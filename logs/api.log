@@ -1,0 +1,3 @@
+{"timestamp": "2026-08-05 12:50:26,749", "level": "WARNING", "message": "rate_limit_unavailable", "logger": "api"}
+{"timestamp": "2026-08-05 12:50:26,753", "level": "INFO", "message": "request_completed", "logger": "api"}
+{"timestamp": "2026-08-05 12:50:26,755", "level": "INFO", "message": "audit_event", "logger": "api"}

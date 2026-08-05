@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+"""Electricity route registration for the CosmozPay backend."""
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config.database import get_db
+from app.controllers.electricity_controller import (
+    ElectricityController,
+    ElectricityDetailRequest,
+    ElectricityHistoryRequest,
+    ElectricityPricingRequest,
+    ElectricityPurchaseRequest,
+    ElectricityReconciliationRequest,
+    ElectricityStatusRequest,
+    MeterValidationRequest,
+    ProvidersRequest,
+)
+from app.routes.notification_routes import build_notification_service
+from app.repositories.provider_repository import ProviderRepository
+from app.repositories.system_settings_repository import SystemSettingsRepository
+from app.repositories.transaction_repository import TransactionRepository
+from app.repositories.user_repository import UserRepository
+from app.repositories.wallet_repository import WalletRepository
+from app.services.electricity.meter import ElectricityMeterService
+from app.services.electricity.pricing import ElectricityPricingService
+from app.services.electricity.purchase import ElectricityPurchaseService
+from app.services.electricity.reconciliation import ElectricityReconciliationService
+from app.services.electricity.validation import ElectricityValidationService
+from app.services.electricity_service import ElectricityService
+from app.services.provider.failover import ProviderFailoverService
+from app.services.provider.health import ProviderHealthService
+from app.services.provider.selector import ProviderSelector
+from app.services.provider_service import ProviderService
+from app.services.wallet import (
+    WalletFundingService,
+    WalletManager,
+    WalletPinService,
+    WalletStatementService,
+    WalletTransferService,
+)
+from app.services.wallet_service import WalletService
+
+
+router = APIRouter(prefix="/electricity", tags=["Electricity"])
+
+
+async def get_electricity_service(session: AsyncSession = Depends(get_db)) -> ElectricityService:
+    """Compose the electricity service graph per request using the active database session."""
+    provider_repository = ProviderRepository(session=session)
+    provider_selector = ProviderSelector(provider_repository=provider_repository)
+    provider_health_service = ProviderHealthService(provider_repository=provider_repository)
+    provider_failover_service = ProviderFailoverService(
+        selector=provider_selector,
+        health_service=provider_health_service,
+    )
+    provider_service = ProviderService(
+        selector=provider_selector,
+        health_service=provider_health_service,
+        failover_service=provider_failover_service,
+        provider_repository=provider_repository,
+    )
+
+    user_repository = UserRepository(session=session)
+    wallet_repository = WalletRepository(session=session)
+    transaction_repository = TransactionRepository(session=session)
+    settings_repository = SystemSettingsRepository(session=session)
+
+    wallet_service = _build_wallet_service(
+        session=session,
+        user_repository=user_repository,
+        wallet_repository=wallet_repository,
+        transaction_repository=transaction_repository,
+    )
+    validation_service = ElectricityValidationService(wallet_service=wallet_service)
+    meter_service = ElectricityMeterService(
+        provider_service=provider_service,
+        settings_repository=settings_repository,
+        validation_service=validation_service,
+    )
+    pricing_service = ElectricityPricingService(settings_repository=settings_repository)
+    purchase_service = ElectricityPurchaseService(
+        wallet_service=wallet_service,
+        provider_service=provider_service,
+        transaction_repository=transaction_repository,
+        user_repository=user_repository,
+        wallet_repository=wallet_repository,
+    )
+    reconciliation_service = ElectricityReconciliationService(
+        provider_service=provider_service,
+        transaction_repository=transaction_repository,
+        settings_repository=settings_repository,
+    )
+
+    return ElectricityService(
+        purchase_service=purchase_service,
+        validation_service=validation_service,
+        meter_service=meter_service,
+        pricing_service=pricing_service,
+        reconciliation_service=reconciliation_service,
+    )
+
+
+def _build_wallet_service(
+    *,
+    session: AsyncSession,
+    user_repository: UserRepository,
+    wallet_repository: WalletRepository,
+    transaction_repository: TransactionRepository,
+) -> WalletService:
+    from app.repositories.virtual_account_repository import VirtualAccountRepository
+    from app.services.virtual_account_service import VirtualAccountService
+    from app.integrations.payments.flutterwave.client import FlutterwaveClient
+    from app.integrations.payments.flutterwave.virtual_accounts import FlutterwaveVirtualAccountService
+
+    virtual_account_repository = VirtualAccountRepository(session=session)
+    flutterwave_client = FlutterwaveClient()
+    flutterwave_va = FlutterwaveVirtualAccountService(client=flutterwave_client)
+    provider_map = {"flutterwave": flutterwave_va}
+
+    virtual_account_service = VirtualAccountService(
+        virtual_account_repository=virtual_account_repository,
+        wallet_repository=wallet_repository,
+        user_repository=user_repository,
+        provider_services=provider_map,
+        notification_service=build_notification_service(session=session, redis_client=None),
+        session=session,
+    )
+
+    wallet_manager = WalletManager(
+        user_repository=user_repository,
+        wallet_repository=wallet_repository,
+        virtual_account_service=virtual_account_service,
+        session=session,
+    )
+    funding_service = WalletFundingService(
+        wallet_repository=wallet_repository,
+        transaction_repository=transaction_repository,
+        user_repository=user_repository,
+        session=session,
+    )
+    transfer_service = WalletTransferService(
+        wallet_repository=wallet_repository,
+        transaction_repository=transaction_repository,
+        session=session,
+    )
+    pin_service = WalletPinService(
+        user_repository=user_repository,
+        wallet_repository=wallet_repository,
+        session=session,
+    )
+    statement_service = WalletStatementService(
+        wallet_repository=wallet_repository,
+        transaction_repository=transaction_repository,
+        session=session,
+    )
+
+    return WalletService(
+        wallet_manager=wallet_manager,
+        funding_service=funding_service,
+        transfer_service=transfer_service,
+        pin_service=pin_service,
+        statement_service=statement_service,
+    )
+
+
+async def get_electricity_controller(
+    electricity_service: ElectricityService = Depends(get_electricity_service),
+) -> ElectricityController:
+    """Instantiate the electricity controller with a request-scoped electricity service."""
+    return ElectricityController(electricity_service)
+
+
+@router.post("/purchase", status_code=status.HTTP_201_CREATED)
+async def purchase_electricity(
+    payload: ElectricityPurchaseRequest,
+    controller: ElectricityController = Depends(get_electricity_controller),
+) -> dict[str, Any]:
+    return await controller.purchase_electricity(payload)
+
+
+@router.post("/meter/validate", status_code=status.HTTP_200_OK)
+async def validate_meter(
+    payload: MeterValidationRequest,
+    controller: ElectricityController = Depends(get_electricity_controller),
+) -> dict[str, Any]:
+    return await controller.validate_meter(payload)
+
+
+@router.post("/price", status_code=status.HTTP_200_OK)
+async def get_price(
+    payload: ElectricityPricingRequest,
+    controller: ElectricityController = Depends(get_electricity_controller),
+) -> dict[str, Any]:
+    return await controller.get_price(payload)
+
+
+@router.get("/providers", status_code=status.HTTP_200_OK)
+async def get_providers(
+    payload: ProvidersRequest,
+    controller: ElectricityController = Depends(get_electricity_controller),
+) -> dict[str, Any]:
+    return await controller.get_providers(payload)
+
+
+@router.get("/status/{reference}", status_code=status.HTTP_200_OK)
+async def get_purchase_status(
+    reference: str,
+    controller: ElectricityController = Depends(get_electricity_controller),
+) -> dict[str, Any]:
+    return await controller.get_purchase_status(reference)
+
+
+@router.post("/reconcile", status_code=status.HTTP_200_OK)
+async def reconcile_transaction(
+    payload: ElectricityReconciliationRequest,
+    controller: ElectricityController = Depends(get_electricity_controller),
+) -> dict[str, Any]:
+    return await controller.reconcile_transaction(payload)
+
+
+@router.post("/history", status_code=status.HTTP_200_OK)
+async def get_purchase_history(
+    payload: ElectricityHistoryRequest,
+    controller: ElectricityController = Depends(get_electricity_controller),
+) -> dict[str, Any]:
+    return await controller.get_purchase_history(payload)
+
+
+@router.get("/details/{reference}", status_code=status.HTTP_200_OK)
+async def get_purchase_details(
+    reference: str,
+    controller: ElectricityController = Depends(get_electricity_controller),
+) -> dict[str, Any]:
+    return await controller.get_purchase_details(reference)

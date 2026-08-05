@@ -1,0 +1,4 @@
+{"timestamp": "2026-07-15 13:56:17,379", "level": "INFO", "message": "hello", "logger": "test"}
+{"timestamp": "2026-07-15 13:56:17,386", "level": "INFO", "message": "provider", "logger": "test"}
+{"timestamp": "2026-07-15 13:56:17,388", "level": "WARNING", "message": "security", "logger": "test"}
+{"timestamp": "2026-07-15 13:56:17,389", "level": "INFO", "message": "audit", "logger": "test"}
