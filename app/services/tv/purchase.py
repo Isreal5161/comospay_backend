@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from app.models.provider import Provider
 from app.models.transaction import Transaction
 from app.models.wallet import Wallet
+from app.integrations.airtime.manager import ProviderManager
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
@@ -25,6 +26,7 @@ class TVPurchaseService:
         *,
         wallet_service: WalletService,
         provider_service: ProviderService,
+        provider_manager: ProviderManager | None = None,
         transaction_repository: TransactionRepository,
         user_repository: UserRepository,
         wallet_repository: WalletRepository,
@@ -32,6 +34,7 @@ class TVPurchaseService:
     ) -> None:
         self.wallet_service = wallet_service
         self.provider_service = provider_service
+        self.provider_manager = provider_manager or ProviderManager()
         self.transaction_repository = transaction_repository
         self.user_repository = user_repository
         self.wallet_repository = wallet_repository
@@ -64,9 +67,6 @@ class TVPurchaseService:
             transaction_pin=transaction_pin,
             package_code=package_code,
         )
-
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required for TV purchases.")
 
         await self._ensure_user_exists(user_id)
         wallet = await self._resolve_wallet(user_id=user_id, wallet_id=wallet_id)
@@ -137,28 +137,19 @@ class TVPurchaseService:
     ) -> dict[str, Any]:
         """Dispatch a pending TV purchase to the provider and update its outcome."""
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required for TV processing.")
 
         self.logger.info("tv_purchase_provider_execution", extra={"reference": resolved.reference})
         try:
-            provider_response = await self.provider_service.execute_tv(
-                operation=provider_operation,
-                validate=self._validate_provider_payload,
-                normalize=self._normalize_provider_response,
-                payload={
-                    "reference": resolved.reference,
-                    "provider": self._extract_provider(resolved),
-                    "smart_card_number": self._extract_smart_card(resolved),
-                    "package_code": self._extract_package_code(resolved),
-                    "service_type": self._extract_service_type(resolved),
-                    "amount": str(resolved.amount),
-                    "currency": resolved.currency,
-                    "wallet_id": str(resolved.wallet_id) if resolved.wallet_id else None,
-                    "user_id": str(resolved.user_id),
-                    "description": resolved.description,
-                    "metadata_payload": metadata_payload,
-                },
+            provider_response = self._normalize_provider_manager_response(
+                await self.provider_manager.execute(
+                    "subscribe_tv",
+                    smart_card_number=self._extract_smart_card(resolved),
+                    provider_code=self._extract_provider_code(resolved),
+                    package=self._extract_package(resolved),
+                    package_code=self._extract_package_code(resolved),
+                    amount=str(resolved.amount),
+                    reference=resolved.reference,
+                )
             )
         except Exception as exc:
             await self._handle_provider_failure(transaction=resolved, reason=str(exc))
@@ -171,7 +162,7 @@ class TVPurchaseService:
                 raise ValidationException("Purchase transaction was not found.")
 
             transaction_record.status = status
-            transaction_record.provider_name = provider_name or provider_response.get("provider", {}).get("name") or transaction_record.provider_name
+            transaction_record.provider_name = provider_name or provider_response.get("provider") or transaction_record.provider_name
             transaction_record.provider_reference = provider_response.get("provider_reference") or transaction_record.provider_reference
             transaction_record.provider_transaction_id = provider_response.get("provider_transaction_id") or transaction_record.provider_transaction_id
             transaction_record.external_reference = transaction_record.provider_reference
@@ -217,8 +208,6 @@ class TVPurchaseService:
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
         if resolved.status in {"succeeded", "completed", "settled"}:
             return await self._build_response(resolved)
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required for TV retries.")
 
         wallet = await self._get_wallet_for_transaction(resolved)
         if resolved.status in {"failed", "cancelled", "reversed"}:
@@ -390,6 +379,10 @@ class TVPurchaseService:
         payload = self._parse_metadata(transaction.metadata_payload)
         return str(payload.get("provider") or "").strip()
 
+    def _extract_provider_code(self, transaction: Transaction) -> str:
+        payload = self._parse_metadata(transaction.metadata_payload)
+        return str(payload.get("provider") or "").strip()
+
     def _extract_smart_card(self, transaction: Transaction) -> str:
         payload = self._parse_metadata(transaction.metadata_payload)
         return str(payload.get("smart_card_number") or "").strip()
@@ -397,6 +390,13 @@ class TVPurchaseService:
     def _extract_package_code(self, transaction: Transaction) -> str | None:
         payload = self._parse_metadata(transaction.metadata_payload)
         return str(payload.get("package_code") or "").strip() or None
+
+    def _extract_package(self, transaction: Transaction) -> str:
+        payload = self._parse_metadata(transaction.metadata_payload)
+        package = str(payload.get("service_type") or "").strip()
+        if package:
+            return package
+        return str(payload.get("package_code") or "").strip()
 
     def _extract_service_type(self, transaction: Transaction) -> str | None:
         payload = self._parse_metadata(transaction.metadata_payload)
@@ -427,6 +427,64 @@ class TVPurchaseService:
         if normalized in {"pending", "processing", "queued"}:
             return "pending"
         return "pending"
+
+    def _normalize_provider_manager_response(self, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise ValidationException("Provider response is invalid.")
+
+        provider_name = result.get("provider")
+        payload = result.get("data") if isinstance(result.get("data"), dict) else result
+
+        transaction_container = None
+        if isinstance(payload, dict):
+            if isinstance(payload.get("transaction_data"), dict):
+                transaction_container = payload.get("transaction_data")
+            elif isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("transaction_data"), dict):
+                transaction_container = payload["data"]["transaction_data"]
+
+        response_data = transaction_container or payload
+
+        status_value = response_data.get("status") if isinstance(response_data, dict) else None
+        if status_value is None and isinstance(payload, dict):
+            status_value = payload.get("status")
+        if status_value is None and isinstance(result.get("success"), bool):
+            status_value = "succeeded" if result.get("success") is True else "failed"
+
+        provider_reference = None
+        provider_transaction_id = None
+        message = None
+        token = None
+        receipt = None
+        metadata: dict[str, Any] | Any = response_data
+
+        if isinstance(response_data, dict):
+            provider_reference = response_data.get("transaction_hash") or response_data.get("ref") or response_data.get("provider_reference")
+            provider_transaction_id = response_data.get("transaction_id") or response_data.get("transaction_hash") or response_data.get("provider_transaction_id")
+            message = response_data.get("message")
+            token = response_data.get("token")
+            receipt = response_data.get("receipt")
+
+        if provider_reference is None and isinstance(payload, dict):
+            provider_reference = payload.get("provider_reference") or payload.get("ref")
+        if provider_transaction_id is None and isinstance(payload, dict):
+            provider_transaction_id = payload.get("provider_transaction_id")
+        if message is None and isinstance(payload, dict):
+            message = payload.get("message")
+        if token is None and isinstance(payload, dict):
+            token = payload.get("token")
+        if receipt is None and isinstance(payload, dict):
+            receipt = payload.get("receipt")
+
+        return {
+            "status": self._normalize_status(status_value),
+            "provider": provider_name or (response_data.get("provider") if isinstance(response_data, dict) else None),
+            "provider_reference": provider_reference,
+            "provider_transaction_id": provider_transaction_id,
+            "message": message or result.get("message"),
+            "token": token,
+            "receipt": receipt,
+            "metadata": metadata,
+        }
 
     def _transaction_scope(self):
         return self.transaction_repository.session.begin()

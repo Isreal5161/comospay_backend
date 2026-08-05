@@ -51,6 +51,7 @@ class AirtimeService:
         phone_number: str,
         amount: Decimal | float | int,
         transaction_pin: str,
+        network: str | None = None,
         wallet_id: UUID | None = None,
         currency: str = "NGN",
         description: str | None = None,
@@ -65,6 +66,7 @@ class AirtimeService:
             phone_number=phone_number,
             amount=amount,
             transaction_pin=transaction_pin,
+            network=network,
             wallet_id=wallet_id,
             currency=currency,
             description=description,
@@ -80,7 +82,7 @@ class AirtimeService:
         *,
         transaction: Transaction | None = None,
         reference: str | None = None,
-        provider_operation: Any | None = None,
+        network: str | None = None,
         provider_name: str | None = None,
         metadata_payload: str | None = None,
     ) -> dict[str, Any]:
@@ -89,7 +91,7 @@ class AirtimeService:
         result = await self.purchase_service.process_airtime_purchase(
             transaction=transaction,
             reference=reference,
-            provider_operation=provider_operation,
+            network=network,
             provider_name=provider_name,
             metadata_payload=metadata_payload,
         )
@@ -114,7 +116,7 @@ class AirtimeService:
         *,
         transaction: Transaction | None = None,
         reference: str | None = None,
-        provider_operation: Any | None = None,
+        network: str | None = None,
         provider_name: str | None = None,
         metadata_payload: str | None = None,
     ) -> dict[str, Any]:
@@ -123,7 +125,7 @@ class AirtimeService:
         result = await self.purchase_service.retry_airtime_purchase(
             transaction=transaction,
             reference=reference,
-            provider_operation=provider_operation,
+            network=network,
             provider_name=provider_name,
             metadata_payload=metadata_payload,
         )

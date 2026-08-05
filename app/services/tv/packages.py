@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 from redis.asyncio import Redis
 
 from app.models.provider import Provider
+from app.integrations.airtime.manager import ProviderManager
 from app.services.provider_service import ProviderService
 from app.utils.exceptions import ProviderException, ValidationException
 
@@ -19,11 +20,13 @@ class TVPackageService:
         self,
         *,
         provider_service: ProviderService,
+        provider_manager: ProviderManager | None = None,
         redis_client: Redis | None = None,
         logger: logging.Logger | None = None,
         cache_ttl_seconds: int = 300,
     ) -> None:
         self.provider_service = provider_service
+        self.provider_manager = provider_manager or ProviderManager()
         self.redis_client = redis_client
         self.logger = logger or logging.getLogger(__name__)
         self.cache_ttl_seconds = cache_ttl_seconds
@@ -50,21 +53,13 @@ class TVPackageService:
                 )
                 return cached_packages
 
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required to retrieve TV packages.")
-
         self.logger.info(
             "tv_package_retrieval_started",
             extra={"cache_key": cache_key, "provider_name": provider_name, "force_refresh": force_refresh},
         )
 
         try:
-            response = await self.provider_service.execute_tv(
-                operation=provider_operation,
-                validate=self._validate_provider_payload,
-                normalize=self._normalize_provider_response,
-                payload={"provider_name": provider_name},
-            )
+            response = await self._retrieve_packages_from_provider_manager(provider_name=provider_name)
         except Exception as exc:
             self.logger.warning(
                 "tv_package_provider_error",
@@ -74,7 +69,14 @@ class TVPackageService:
 
         packages = self._extract_packages(response)
         self._validate_packages_response(packages)
-        normalized_packages = [self._normalize_package(package, provider_name=provider_name) for package in packages]
+        normalized_packages = [
+            self._normalize_package(
+                package,
+                provider_name=provider_name or response.get("provider_name"),
+                provider_metadata=response.get("metadata"),
+            )
+            for package in packages
+        ]
 
         await self.cache_packages(
             normalized_packages,
@@ -219,14 +221,27 @@ class TVPackageService:
         if isinstance(response, list):
             packages = response
         elif isinstance(response, dict):
-            packages = (
-                response.get("packages")
-                or response.get("bouquets")
-                or response.get("results")
-                or response.get("data")
-                or response.get("items")
-                or []
-            )
+            if isinstance(response.get("data"), list):
+                packages = response.get("data")
+            elif isinstance(response.get("data"), dict):
+                nested = response.get("data")
+                packages = (
+                    nested.get("packages")
+                    or nested.get("bouquets")
+                    or nested.get("results")
+                    or nested.get("data")
+                    or nested.get("items")
+                    or []
+                )
+            else:
+                packages = (
+                    response.get("packages")
+                    or response.get("bouquets")
+                    or response.get("results")
+                    or response.get("data")
+                    or response.get("items")
+                    or []
+                )
         else:
             packages = []
 
@@ -234,7 +249,7 @@ class TVPackageService:
             raise ValidationException("Provider response does not contain TV package items.")
         return [package for package in packages if isinstance(package, dict)]
 
-    def _normalize_package(self, package: dict[str, Any], *, provider_name: str | None = None) -> dict[str, Any]:
+    def _normalize_package(self, package: dict[str, Any], *, provider_name: str | None = None, provider_metadata: Any | None = None) -> dict[str, Any]:
         if not isinstance(package, dict):
             raise ValidationException("TV package payload is invalid.")
 
@@ -250,6 +265,9 @@ class TVPackageService:
             "description": package.get("description"),
             "status": package.get("status") or ("active" if package.get("is_active", True) else "inactive"),
         }
+
+        if provider_metadata is not None:
+            normalized["metadata"] = provider_metadata
 
         return normalized
 
@@ -280,4 +298,81 @@ class TVPackageService:
         raise ValidationException("Provider response is invalid.")
 
 
+
+    async def _retrieve_packages_from_provider_manager(self, *, provider_name: str | None) -> dict[str, Any]:
+        providers_response = self._normalize_provider_manager_response(
+            await self.provider_manager.execute("fetch_cable_tv_providers")
+        )
+        provider_entries = self._extract_provider_entries(providers_response)
+
+        if provider_name is not None:
+            provider_entry = self._resolve_provider_entry(provider_entries, provider_name)
+            provider_code = self._extract_provider_code(provider_entry)
+            bouquets_response = self._normalize_provider_manager_response(
+                await self.provider_manager.execute("fetch_cable_tv_bouquets", provider_code=provider_code)
+            )
+            return {
+                "provider_name": self._extract_provider_name(provider_entry) or provider_name,
+                "packages": self._extract_packages(bouquets_response),
+                "metadata": bouquets_response.get("metadata") or providers_response.get("metadata"),
+            }
+
+        packages: list[dict[str, Any]] = []
+        provider_metadata = providers_response.get("metadata")
+        for provider_entry in provider_entries:
+            provider_code = self._extract_provider_code(provider_entry)
+            provider_display_name = self._extract_provider_name(provider_entry) or provider_code
+            bouquets_response = self._normalize_provider_manager_response(
+                await self.provider_manager.execute("fetch_cable_tv_bouquets", provider_code=provider_code)
+            )
+            for package in self._extract_packages(bouquets_response):
+                packages.append(
+                    self._normalize_package(
+                        package,
+                        provider_name=provider_display_name,
+                        provider_metadata=bouquets_response.get("metadata") or provider_metadata,
+                    )
+                )
+
+        return {"provider_name": None, "packages": packages, "metadata": provider_metadata}
+
+    def _normalize_provider_manager_response(self, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise ProviderException(detail="Provider response is invalid.")
+
+        provider_name = result.get("provider")
+        payload = result.get("data") if isinstance(result.get("data"), (dict, list)) else result
+        return {
+            "provider": provider_name,
+            "data": payload,
+            "metadata": result.get("metadata"),
+        }
+
+    def _extract_provider_entries(self, response: dict[str, Any]) -> list[dict[str, Any]]:
+        payload = response.get("data")
+        if isinstance(payload, list):
+            return [provider for provider in payload if isinstance(provider, dict)]
+        if isinstance(payload, dict):
+            for key in ("providers", "data", "results", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [provider for provider in value if isinstance(provider, dict)]
+            if any(payload.get(field) is not None for field in ("provider_code", "provider_name", "code", "name", "id")):
+                return [payload]
+        return []
+
+    def _resolve_provider_entry(self, providers: list[dict[str, Any]], provider_name: str) -> dict[str, Any]:
+        normalized = provider_name.strip().lower()
+        for provider in providers:
+            provider_code = self._extract_provider_code(provider).lower()
+            provider_display_name = self._extract_provider_name(provider).lower()
+            if normalized in {provider_code, provider_display_name} or normalized in provider_code or normalized in provider_display_name:
+                return provider
+        raise ValidationException("TV provider was not found.")
+
+    def _extract_provider_code(self, provider: dict[str, Any]) -> str:
+        return str(provider.get("provider_code") or provider.get("code") or provider.get("id") or provider.get("name") or "").strip()
+
+    def _extract_provider_name(self, provider: dict[str, Any]) -> str:
+        return str(provider.get("provider_name") or provider.get("name") or provider.get("code") or "").strip()
 __all__ = ["TVPackageService"]

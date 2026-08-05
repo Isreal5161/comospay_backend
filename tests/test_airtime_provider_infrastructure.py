@@ -17,6 +17,7 @@ class _StubProvider:
         self._provider_name = provider_name
         self._provider_priority = provider_priority
         self._action = action
+        self.calls: list[dict] = []
 
     @property
     def name(self) -> str:
@@ -31,9 +32,21 @@ class _StubProvider:
         return True
 
     async def buy_airtime(self, **kwargs):
+        self.calls.append(kwargs)
         if self._action is None:
             return {"provider": self.name, "status": "ok", "payload": kwargs}
         return await self._action(**kwargs)
+
+
+def _register_stub_provider(registry: ProviderRegistry, *, name: str, priority: int, action) -> _StubProvider:
+    provider = _StubProvider(provider_name=name, provider_priority=priority, action=action)
+    registry.register_provider(
+        name=name,
+        priority=priority,
+        api_key=f"{name}-token",
+        factory=lambda provider=provider: provider,
+    )
+    return provider
 
 
 def test_settings_supports_provider_base_urls_and_keys() -> None:
@@ -82,86 +95,139 @@ def test_registry_ignores_disabled_provider_without_instantiating() -> None:
 def test_registry_returns_enabled_providers_sorted_by_priority() -> None:
     registry = ProviderRegistry()
     registry.register_provider(
-        name="p2",
-        priority=20,
-        api_key="token-2",
-        factory=lambda: _StubProvider(provider_name="p2", provider_priority=20),
+        name="vtung",
+        priority=40,
+        api_key="token-4",
+        factory=lambda: _StubProvider(provider_name="vtung", provider_priority=40),
     )
     registry.register_provider(
-        name="p1",
+        name="clubconnect",
+        priority=30,
+        api_key="token-3",
+        factory=lambda: _StubProvider(provider_name="clubconnect", provider_priority=30),
+    )
+    registry.register_provider(
+        name="vtugate",
+        priority=20,
+        api_key="token-2",
+        factory=lambda: _StubProvider(provider_name="vtugate", provider_priority=20),
+    )
+    registry.register_provider(
+        name="aidapay",
         priority=10,
         api_key="token-1",
-        factory=lambda: _StubProvider(provider_name="p1", provider_priority=10),
+        factory=lambda: _StubProvider(provider_name="aidapay", provider_priority=10),
     )
 
     enabled = registry.get_enabled_providers()
 
-    assert [provider.name for provider in enabled] == ["p1", "p2"]
+    assert [provider.name for provider in enabled] == ["aidapay", "vtugate", "clubconnect", "vtung"]
 
 
 @pytest.mark.asyncio
-async def test_provider_manager_fails_over_and_returns_first_success() -> None:
+async def test_provider_manager_fails_over_in_priority_order_and_returns_first_success() -> None:
     registry = ProviderRegistry()
+    call_order: list[str] = []
 
-    async def unavailable(**kwargs):
+    async def unavailable(provider_name: str, **kwargs):
+        call_order.append(provider_name)
         raise ProviderUnavailableError("unavailable")
 
-    async def temporary_failure(**kwargs):
+    async def temporary_failure(provider_name: str, **kwargs):
+        call_order.append(provider_name)
         raise ProviderTemporaryFailure("temporary")
 
-    async def successful(**kwargs):
-        return {"status": "ok", "provider": "third", "payload": kwargs}
+    async def successful(provider_name: str, **kwargs):
+        call_order.append(provider_name)
+        return {"status": "ok", "provider": provider_name, "payload": kwargs}
 
-    registry.register_provider(
-        name="first",
-        priority=10,
-        api_key="token",
-        factory=lambda: _StubProvider(provider_name="first", provider_priority=10, action=unavailable),
-    )
-    registry.register_provider(
-        name="second",
-        priority=20,
-        api_key="token",
-        factory=lambda: _StubProvider(provider_name="second", provider_priority=20, action=temporary_failure),
-    )
-    registry.register_provider(
-        name="third",
-        priority=30,
-        api_key="token",
-        factory=lambda: _StubProvider(provider_name="third", provider_priority=30, action=successful),
-    )
+    _register_stub_provider(registry, name="aidapay", priority=10, action=lambda **kwargs: unavailable("aidapay", **kwargs))
+    _register_stub_provider(registry, name="vtugate", priority=20, action=lambda **kwargs: temporary_failure("vtugate", **kwargs))
+    _register_stub_provider(registry, name="clubconnect", priority=30, action=lambda **kwargs: unavailable("clubconnect", **kwargs))
+    _register_stub_provider(registry, name="vtung", priority=40, action=lambda **kwargs: successful("vtung", **kwargs))
 
     manager = ProviderManager(registry=registry)
     result = await manager.execute("buy_airtime", phone_number="08000000000")
 
-    assert result["status"] == "ok"
-    assert result["provider"] == "third"
+    assert call_order == ["aidapay", "vtugate", "clubconnect", "vtung"]
+    assert result["provider"] == "vtung"
+    assert result["data"]["status"] == "ok"
 
 
 @pytest.mark.asyncio
-async def test_provider_manager_raises_when_all_enabled_providers_fail() -> None:
+async def test_provider_manager_stops_after_first_success_in_priority_order() -> None:
     registry = ProviderRegistry()
+    call_order: list[str] = []
 
-    async def unavailable(**kwargs):
-        raise ProviderUnavailableError("unavailable")
+    async def successful(provider_name: str, **kwargs):
+        call_order.append(provider_name)
+        return {"status": "ok", "provider": provider_name, "payload": kwargs}
 
-    async def temporary_failure(**kwargs):
-        raise ProviderTemporaryFailure("temporary")
+    _register_stub_provider(registry, name="aidapay", priority=10, action=lambda **kwargs: successful("aidapay", **kwargs))
+    _register_stub_provider(registry, name="vtugate", priority=20, action=lambda **kwargs: successful("vtugate", **kwargs))
+    _register_stub_provider(registry, name="clubconnect", priority=30, action=lambda **kwargs: successful("clubconnect", **kwargs))
+    _register_stub_provider(registry, name="vtung", priority=40, action=lambda **kwargs: successful("vtung", **kwargs))
 
-    registry.register_provider(
-        name="first",
-        priority=10,
-        api_key="token",
-        factory=lambda: _StubProvider(provider_name="first", provider_priority=10, action=unavailable),
-    )
-    registry.register_provider(
-        name="second",
-        priority=20,
-        api_key="token",
-        factory=lambda: _StubProvider(provider_name="second", provider_priority=20, action=temporary_failure),
-    )
+    manager = ProviderManager(registry=registry)
+    result = await manager.execute("buy_airtime", phone_number="08000000000")
+
+    assert call_order == ["aidapay"]
+    assert result["provider"] == "aidapay"
+    assert result["data"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_factory",
+    [ProviderUnavailableError, ProviderTemporaryFailure],
+)
+async def test_provider_manager_retries_when_provider_raises_retryable_error(error_factory) -> None:
+    registry = ProviderRegistry()
+    call_order: list[str] = []
+
+    async def retryable(provider_name: str, **kwargs):
+        call_order.append(provider_name)
+        raise error_factory("retryable")
+
+    async def successful(provider_name: str, **kwargs):
+        call_order.append(provider_name)
+        return {"status": "ok", "provider": provider_name, "payload": kwargs}
+
+    _register_stub_provider(registry, name="aidapay", priority=10, action=lambda **kwargs: retryable("aidapay", **kwargs))
+    _register_stub_provider(registry, name="vtugate", priority=20, action=lambda **kwargs: successful("vtugate", **kwargs))
+    _register_stub_provider(registry, name="clubconnect", priority=30, action=lambda **kwargs: successful("clubconnect", **kwargs))
+    _register_stub_provider(registry, name="vtung", priority=40, action=lambda **kwargs: successful("vtung", **kwargs))
+
+    manager = ProviderManager(registry=registry)
+    result = await manager.execute("buy_airtime", phone_number="08000000000")
+
+    assert call_order == ["aidapay", "vtugate"]
+    assert result["provider"] == "vtugate"
+    assert result["data"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_factory",
+    [ProviderUnavailableError, ProviderTemporaryFailure],
+)
+async def test_provider_manager_raises_when_all_enabled_providers_fail(error_factory) -> None:
+    registry = ProviderRegistry()
+    call_order: list[str] = []
+
+    async def failing(provider_name: str, **kwargs):
+        call_order.append(provider_name)
+        raise error_factory("failure")
+
+    _register_stub_provider(registry, name="aidapay", priority=10, action=lambda **kwargs: failing("aidapay", **kwargs))
+    _register_stub_provider(registry, name="vtugate", priority=20, action=lambda **kwargs: failing("vtugate", **kwargs))
+    _register_stub_provider(registry, name="clubconnect", priority=30, action=lambda **kwargs: failing("clubconnect", **kwargs))
+    _register_stub_provider(registry, name="vtung", priority=40, action=lambda **kwargs: failing("vtung", **kwargs))
 
     manager = ProviderManager(registry=registry)
 
-    with pytest.raises(NoProviderAvailableError):
+    with pytest.raises(NoProviderAvailableError) as exc_info:
         await manager.execute("buy_airtime", phone_number="08000000000")
+
+    assert call_order == ["aidapay", "vtugate", "clubconnect", "vtung"]
+    assert "failure" in str(exc_info.value)

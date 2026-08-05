@@ -19,6 +19,7 @@ class AirtimePurchaseRequest(BaseModel):
 
     user_id: UUID = Field(..., description="Identifier of the user making the purchase.")
     phone_number: str = Field(..., description="Recipient phone number.")
+    network: str | None = Field(default=None, description="Optional network operator name, such as MTN or Glo.")
     amount: Decimal = Field(..., gt=0, description="Airtime amount to purchase.")
     transaction_pin: str = Field(..., min_length=4, description="Transaction PIN used to authorize the purchase.")
     wallet_id: UUID | None = Field(default=None, description="Optional wallet identifier.")
@@ -98,6 +99,7 @@ class AirtimeController:
             payload={
                 "user_id": payload.user_id,
                 "phone_number": payload.phone_number,
+                "network": payload.network,
                 "amount": payload.amount,
                 "transaction_pin": payload.transaction_pin,
                 "wallet_id": payload.wallet_id,

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.models.provider import Provider
 from app.models.transaction import Transaction
 from app.models.wallet import Wallet
+from app.integrations.airtime.manager import ProviderManager
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.services.provider_service import ProviderService
@@ -26,12 +27,14 @@ class DataPurchaseService:
         *,
         wallet_service: WalletService,
         provider_service: ProviderService,
+        provider_manager: ProviderManager | None = None,
         transaction_repository: TransactionRepository,
         user_repository: UserRepository,
         logger: logging.Logger | None = None,
     ) -> None:
         self.wallet_service = wallet_service
         self.provider_service = provider_service
+        self.provider_manager = provider_manager or ProviderManager()
         self.transaction_repository = transaction_repository
         self.user_repository = user_repository
         self.logger = logger or logging.getLogger(__name__)
@@ -44,6 +47,7 @@ class DataPurchaseService:
         amount: Decimal | float | int,
         transaction_pin: str,
         network: str | None = None,
+        plan_id: str | None = None,
         bundle_code: str | None = None,
         wallet_id: UUID | None = None,
         currency: str = "NGN",
@@ -62,9 +66,6 @@ class DataPurchaseService:
             network=network,
             bundle_code=bundle_code,
         )
-
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required for data purchases.")
 
         await self._ensure_user_exists(user_id)
         wallet = await self._resolve_wallet(user_id=user_id, wallet_id=wallet_id)
@@ -118,7 +119,8 @@ class DataPurchaseService:
 
         return await self.process_data_purchase(
             transaction=transaction,
-            provider_operation=provider_operation,
+            network=network,
+            bundle_code=bundle_code,
             provider_name=provider_name,
             metadata_payload=metadata_payload,
         )
@@ -128,33 +130,26 @@ class DataPurchaseService:
         *,
         transaction: Transaction | None = None,
         reference: str | None = None,
-        provider_operation: Callable[[Provider], Awaitable[Any]] | None = None,
+        network: str | None = None,
+        bundle_code: str | None = None,
         provider_name: str | None = None,
+        provider_operation: Callable[[Provider], Awaitable[Any]] | None = None,
         metadata_payload: str | None = None,
     ) -> dict[str, Any]:
         """Dispatch a pending data purchase through the provider and update the transaction outcome."""
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required for data processing.")
 
         self.logger.info("data_purchase_provider_execution", extra={"reference": resolved.reference})
         try:
-            provider_response = await self.provider_service.execute_data(
-                operation=provider_operation,
-                validate=self._validate_provider_payload,
-                normalize=self._normalize_provider_response,
-                payload={
-                    "reference": resolved.reference,
-                    "phone_number": self._extract_phone_number(resolved),
-                    "network": self._extract_network(resolved),
-                    "bundle_code": self._extract_bundle_code(resolved),
-                    "amount": str(resolved.amount),
-                    "currency": resolved.currency,
-                    "wallet_id": str(resolved.wallet_id) if resolved.wallet_id else None,
-                    "user_id": str(resolved.user_id),
-                    "description": resolved.description,
-                    "metadata_payload": metadata_payload,
-                },
+            provider_response = self._normalize_provider_manager_response(
+                await self.provider_manager.execute(
+                    operation="buy_data",
+                    phone_number=self._extract_phone_number(resolved),
+                    network=network or self._extract_network(resolved),
+                    bundle_code=bundle_code or self._extract_bundle_code(resolved),
+                    amount=str(resolved.amount),
+                    reference=resolved.reference,
+                )
             )
         except Exception as exc:
             await self._handle_provider_failure(transaction=resolved, reason=str(exc))
@@ -167,7 +162,7 @@ class DataPurchaseService:
                 raise ValidationException("Purchase transaction was not found.")
 
             transaction_record.status = status
-            transaction_record.provider_name = provider_name or provider_response.get("provider", {}).get("name") or transaction_record.provider_name
+            transaction_record.provider_name = provider_name or provider_response.get("provider") or transaction_record.provider_name
             transaction_record.provider_reference = provider_response.get("provider_reference") or transaction_record.provider_reference
             transaction_record.provider_transaction_id = provider_response.get("provider_transaction_id") or transaction_record.provider_transaction_id
             transaction_record.external_reference = transaction_record.provider_reference
@@ -247,7 +242,8 @@ class DataPurchaseService:
         self.logger.info("data_purchase_retry", extra={"reference": resolved.reference, "status": resolved.status})
         return await self.process_data_purchase(
             transaction=resolved,
-            provider_operation=provider_operation,
+            network=self._extract_network(resolved),
+            bundle_code=self._extract_bundle_code(resolved),
             provider_name=provider_name,
             metadata_payload=metadata_payload,
         )
@@ -462,6 +458,53 @@ class DataPurchaseService:
             "provider_transaction_id": payload.get("provider_transaction_id") or payload.get("transaction_id"),
             "message": payload.get("message"),
             "metadata": payload.get("metadata"),
+        }
+
+    def _normalize_provider_manager_response(self, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise ValidationException("Provider response is invalid.")
+
+        provider_name = result.get("provider")
+        payload = result.get("data") if isinstance(result.get("data"), dict) else result
+
+        transaction_container = None
+        if isinstance(payload, dict):
+            if isinstance(payload.get("transaction_data"), dict):
+                transaction_container = payload.get("transaction_data")
+            elif isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("transaction_data"), dict):
+                transaction_container = payload["data"]["transaction_data"]
+
+        response_data = transaction_container or payload
+
+        status_value = response_data.get("status") if isinstance(response_data, dict) else None
+        if status_value is None and isinstance(payload, dict):
+            status_value = payload.get("status")
+        if status_value is None and isinstance(result.get("success"), bool):
+            status_value = "succeeded" if result.get("success") is True else "failed"
+
+        provider_reference = None
+        provider_transaction_id = None
+        message = None
+        metadata: dict[str, Any] | Any = response_data
+        if isinstance(response_data, dict):
+            provider_reference = response_data.get("transaction_hash") or response_data.get("ref")
+            provider_transaction_id = response_data.get("transaction_id") or response_data.get("transaction_hash")
+            message = response_data.get("message")
+
+        if provider_reference is None and isinstance(payload, dict):
+            provider_reference = payload.get("provider_reference") or payload.get("ref")
+        if provider_transaction_id is None and isinstance(payload, dict):
+            provider_transaction_id = payload.get("provider_transaction_id")
+        if message is None and isinstance(payload, dict):
+            message = payload.get("message")
+
+        return {
+            "status": self._normalize_status(status_value),
+            "provider": provider_name or (response_data.get("provider") if isinstance(response_data, dict) else None),
+            "provider_reference": provider_reference,
+            "provider_transaction_id": provider_transaction_id,
+            "message": message or result.get("message"),
+            "metadata": metadata,
         }
 
     def _normalize_status(self, status: str | None) -> str:

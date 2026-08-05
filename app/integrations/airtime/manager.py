@@ -34,7 +34,8 @@ class ProviderManager:
                 continue
 
             try:
-                return await provider_operation(**kwargs)
+                result = await provider_operation(**kwargs)
+                return {"provider": provider.name, "data": result}
             except (ProviderUnavailableError, ProviderTemporaryFailure) as exc:
                 last_error = exc
                 continue

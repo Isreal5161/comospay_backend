@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable
 from redis.asyncio import Redis
 
 from app.models.provider import Provider
+from app.integrations.airtime.manager import ProviderManager
 from app.services.provider_service import ProviderService
 from app.utils.exceptions import ProviderException, ValidationException
 
@@ -18,11 +19,13 @@ class DataPlanService:
         self,
         *,
         provider_service: ProviderService,
+        provider_manager: ProviderManager | None = None,
         redis_client: Redis | None = None,
         logger: logging.Logger | None = None,
         cache_ttl_seconds: int = 300,
     ) -> None:
         self.provider_service = provider_service
+        self.provider_manager = provider_manager or ProviderManager()
         self.redis_client = redis_client
         self.logger = logger or logging.getLogger(__name__)
         self.cache_ttl_seconds = cache_ttl_seconds
@@ -49,19 +52,16 @@ class DataPlanService:
                 self.logger.info("data_plan_cache_hit", extra={"cache_key": cache_key, "network": network, "provider_name": provider_name})
                 return cached_plans
 
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required to retrieve data plans.")
-
         self.logger.info(
             "data_plan_retrieval_started",
             extra={"cache_key": cache_key, "network": network, "provider_name": provider_name, "force_refresh": force_refresh},
         )
         try:
-            response = await self.provider_service.execute_data(
-                operation=provider_operation,
-                validate=self._validate_provider_payload,
-                normalize=self._normalize_provider_response,
-                payload={"network": network, "provider_name": provider_name},
+            response = self._normalize_provider_manager_response(
+                await self.provider_manager.execute(
+                    "fetch_data_plans",
+                    network=network,
+                )
             )
         except Exception as exc:
             self.logger.warning(
@@ -269,10 +269,44 @@ class DataPlanService:
             "metadata": payload.get("metadata"),
         }
 
+    def _normalize_provider_manager_response(self, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise ProviderException(detail="Provider response is invalid.")
+
+        provider_name = result.get("provider")
+        payload = result.get("data") if isinstance(result.get("data"), dict) else result
+
+        response_data = payload
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            response_data = payload["data"]
+
+        metadata = None
+        if isinstance(payload, dict):
+            metadata = payload.get("metadata")
+        if metadata is None and isinstance(response_data, dict):
+            metadata = response_data.get("metadata")
+
+        return {
+            "provider": provider_name or (response_data.get("provider") if isinstance(response_data, dict) else None),
+            "plans": self._extract_plans(response_data),
+            "metadata": metadata,
+            "raw": response_data,
+        }
+
     def _extract_plans(self, response: Any) -> list[dict[str, Any]]:
         if isinstance(response, list):
             return [plan for plan in response if isinstance(plan, dict)]
         if isinstance(response, dict):
+            if isinstance(response.get("data"), dict):
+                nested = response["data"]
+                if isinstance(nested.get("plans"), list):
+                    return [plan for plan in nested["plans"] if isinstance(plan, dict)]
+                if isinstance(nested.get("items"), list):
+                    return [plan for plan in nested["items"] if isinstance(plan, dict)]
+                if isinstance(nested.get("result"), list):
+                    return [plan for plan in nested["result"] if isinstance(plan, dict)]
+                if isinstance(nested.get("plan"), dict):
+                    return [nested["plan"]]
             for key in ("plans", "data", "result", "items"):
                 value = response.get(key)
                 if isinstance(value, list):

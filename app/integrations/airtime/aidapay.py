@@ -60,7 +60,7 @@ class AidaPayProvider(VTUProvider):
 
 	@property
 	def is_available(self) -> bool:
-		return bool(self._api_key and self._base_url)
+		return bool(self._api_key and self._base_url and self._account_pin)
 
 	async def check_balance(self) -> dict[str, Any]:
 		return await self._request("GET", "/my_account")
@@ -117,14 +117,14 @@ class AidaPayProvider(VTUProvider):
 		self,
 		*,
 		smart_card_number: str,
+		provider_code: str,
 		package: str,
+		package_code: str,
 		amount: float | int,
 		reference: str | None = None,
-		provider_code: str | None = None,
-		package_code: str | None = None,
 	) -> dict[str, Any]:
-		resolved_provider_code = (provider_code or "").strip()
-		resolved_package_code = (package_code or "").strip()
+		resolved_provider_code = provider_code.strip()
+		resolved_package_code = package_code.strip()
 		if not resolved_provider_code:
 			raise ProviderUnavailableError("AidaPay provider_code is required for cable TV purchase.")
 		if not resolved_package_code:
@@ -164,6 +164,25 @@ class AidaPayProvider(VTUProvider):
 		if not normalized:
 			raise ProviderUnavailableError("AidaPay provider_code is required for cable TV bouquets.")
 		return await self._request("GET", f"/packages/{quote(normalized, safe='')}")
+
+	async def verify_electricity(self, *, meter_number: str, provider: str) -> dict[str, Any]:
+		raise NotImplementedError("AidaPay electricity verification is not implemented yet.")
+
+	async def verify_cable_tv(self, *, smart_card_number: str, provider_code: str, phone: str) -> dict[str, Any]:
+		raise NotImplementedError("AidaPay cable TV verification is not implemented yet.")
+
+	async def get_education_price(self, *, service_id: str | int) -> dict[str, Any]:
+		raise NotImplementedError("AidaPay education pricing is not implemented yet.")
+
+	async def buy_education_pins(
+		self,
+		*,
+		service_id: str | int,
+		phone: str,
+		quantity: int,
+		product_code: str,
+	) -> dict[str, Any]:
+		raise NotImplementedError("AidaPay education pin purchase is not implemented yet.")
 
 	def _resolve_timeout(self) -> float:
 		connect_timeout = getattr(settings, "connection_timeout", 10)

@@ -9,11 +9,13 @@ from uuid import UUID, uuid4
 
 from redis.asyncio import Redis
 
+from app.integrations.airtime.exceptions import NoProviderAvailableError
+from app.integrations.airtime.manager import ProviderManager
 from app.models.provider import Provider
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.services.electricity.validation import ElectricityValidationService
 from app.services.provider_service import ProviderService
-from app.utils.exceptions import ValidationException
+from app.utils.exceptions import ProviderException, ValidationException
 
 
 class ElectricityMeterService:
@@ -28,6 +30,7 @@ class ElectricityMeterService:
         self,
         *,
         provider_service: ProviderService,
+        provider_manager: ProviderManager | None = None,
         settings_repository: SystemSettingsRepository,
         validation_service: ElectricityValidationService | None = None,
         redis_client: Redis | None = None,
@@ -35,6 +38,7 @@ class ElectricityMeterService:
         cache_ttl_seconds: int = 300,
     ) -> None:
         self.provider_service = provider_service
+        self.provider_manager = provider_manager or ProviderManager()
         self.settings_repository = settings_repository
         self.validation_service = validation_service
         self.redis_client = redis_client
@@ -54,9 +58,6 @@ class ElectricityMeterService:
         normalized_meter_number = self._normalize_meter_number(meter_number)
         normalized_disco = self._normalize_disco(disco)
         normalized_meter_type = self._normalize_meter_type(meter_type)
-
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required for meter verification.")
 
         settings = await self._load_provider_settings(provider_name=provider_name)
         cache_key = self._cache_key(
@@ -79,24 +80,26 @@ class ElectricityMeterService:
             },
         )
 
-        response = await self.provider_service.execute_electricity(
-            operation=provider_operation,
-            validate=self._validate_provider_payload,
-            normalize=lambda provider, result: self._normalize_provider_response(
-                provider=provider,
-                result=result,
+        try:
+            response = self._normalize_provider_manager_response(
+                result=await self.provider_manager.execute(
+                    operation="purchase_electricity",
+                    meter_number=normalized_meter_number,
+                    provider=normalized_disco,
+                    amount=0,
+                    reference=f"meter-verify-{uuid4().hex[:12]}",
+                ),
                 meter_number=normalized_meter_number,
                 disco=normalized_disco,
                 meter_type=normalized_meter_type,
                 provider_name=provider_name,
-            ),
-            payload={
-                "meter_number": normalized_meter_number,
-                "disco": normalized_disco,
-                "meter_type": normalized_meter_type,
-                "provider_name": provider_name,
-            },
-        )
+            )
+        except NoProviderAvailableError as exc:
+            raise ProviderException(detail=str(exc)) from exc
+        except ProviderException:
+            raise
+        except Exception as exc:
+            raise ProviderException(detail=str(exc)) from exc
 
         verification = self._build_verification_response(response, provider_name=provider_name)
         await self._cache_verification(cache_key, verification, settings)
@@ -107,9 +110,9 @@ class ElectricityMeterService:
     async def _load_provider_settings(self, *, provider_name: str | None) -> dict[str, Any]:
         provider_name_normalized = self._normalize_provider_name(provider_name)
         settings: dict[str, Any] = {
-            "cache_enabled": self._load_bool_setting("verification_cache_enabled", provider_name=provider_name_normalized, default=True),
-            "cache_ttl_seconds": self._load_int_setting("verification_cache_ttl", provider_name=provider_name_normalized, default=self.cache_ttl_seconds),
-            "verification_enabled": self._load_bool_setting("verification_enabled", provider_name=provider_name_normalized, default=True),
+            "cache_enabled": await self._load_bool_setting("verification_cache_enabled", provider_name=provider_name_normalized, default=True),
+            "cache_ttl_seconds": await self._load_int_setting("verification_cache_ttl", provider_name=provider_name_normalized, default=self.cache_ttl_seconds),
+            "verification_enabled": await self._load_bool_setting("verification_enabled", provider_name=provider_name_normalized, default=True),
             "provider_specific": provider_name_normalized is not None,
         }
         if not settings["verification_enabled"]:
@@ -124,10 +127,9 @@ class ElectricityMeterService:
         if not payload.get("disco"):
             raise ValidationException("Distribution company is required for meter verification.")
 
-    def _normalize_provider_response(
+    def _normalize_provider_manager_response(
         self,
         *,
-        provider: Provider,
         result: Any,
         meter_number: str,
         disco: str,
@@ -137,16 +139,35 @@ class ElectricityMeterService:
         if not isinstance(result, dict):
             raise ValidationException("Meter verification response must be a dictionary.")
 
+        provider_value = self._coerce_string(result.get("provider"))
+        payload = result.get("data") if isinstance(result.get("data"), dict) else result
+        response_data: dict[str, Any] | Any = payload
+        if isinstance(payload, dict):
+            if isinstance(payload.get("verification"), dict):
+                response_data = payload["verification"]
+            elif isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("verification"), dict):
+                response_data = payload["data"]["verification"]
+            elif isinstance(payload.get("transaction_data"), dict):
+                response_data = payload["transaction_data"]
+            elif isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("transaction_data"), dict):
+                response_data = payload["data"]["transaction_data"]
+
         normalized = {
-            "customer_name": self._coerce_string(result.get("customer_name") or result.get("name") or result.get("account_name")),
+            "customer_name": self._coerce_string(response_data.get("customer_name") or response_data.get("name") or response_data.get("account_name") if isinstance(response_data, dict) else None),
             "meter_number": meter_number,
-            "meter_type": self._coerce_string(result.get("meter_type") or meter_type),
-            "address": self._coerce_string(result.get("address") or result.get("customer_address") or result.get("location")),
+            "meter_type": self._coerce_string(response_data.get("meter_type") or meter_type if isinstance(response_data, dict) else meter_type),
+            "address": self._coerce_string(response_data.get("address") or response_data.get("customer_address") or response_data.get("location") if isinstance(response_data, dict) else None),
             "disco": disco,
-            "provider_name": provider_name or provider.name,
-            "provider_reference": self._coerce_string(result.get("reference") or result.get("verification_reference") or result.get("transaction_id") or str(uuid4())),
+            "provider_name": provider_name or provider_value or self._coerce_string(response_data.get("provider") if isinstance(response_data, dict) else None),
+            "provider_reference": self._coerce_string(
+                (response_data.get("reference") if isinstance(response_data, dict) else None)
+                or (response_data.get("verification_reference") if isinstance(response_data, dict) else None)
+                or (response_data.get("transaction_id") if isinstance(response_data, dict) else None)
+                or result.get("provider_reference")
+                or str(uuid4())
+            ),
             "verified_at": datetime.now(timezone.utc).isoformat(),
-            "raw_payload": result,
+            "raw_payload": response_data,
         }
 
         self._assert_verification_required_fields(normalized)
@@ -219,12 +240,12 @@ class ElectricityMeterService:
             return self._parse_setting_value(record.value, record.value_type)
         return None
 
-    def _load_bool_setting(self, key: str, provider_name: str | None = None, default: bool = False) -> bool:
-        value = self._load_setting(key, provider_name=provider_name)
+    async def _load_bool_setting(self, key: str, provider_name: str | None = None, default: bool = False) -> bool:
+        value = await self._load_setting(key, provider_name=provider_name)
         return self._coerce_bool(value, default=default)
 
-    def _load_int_setting(self, key: str, provider_name: str | None = None, default: int = 0) -> int:
-        value = self._load_setting(key, provider_name=provider_name)
+    async def _load_int_setting(self, key: str, provider_name: str | None = None, default: int = 0) -> int:
+        value = await self._load_setting(key, provider_name=provider_name)
         if isinstance(value, int):
             return value
         if isinstance(value, str) and value.isdigit():

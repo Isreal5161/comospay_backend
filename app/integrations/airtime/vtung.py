@@ -41,6 +41,37 @@ class VTUNGProvider(VTUProvider):
 	async def check_balance(self) -> dict[str, Any]:
 		raise NotImplementedError("VTU.ng balance integration is not implemented yet.")
 
+	async def fetch_data_plans(self, *, network: str) -> dict[str, Any]:
+		raise NotImplementedError("VTU.ng data plans integration is not implemented yet.")
+
+	async def fetch_electricity_providers(self) -> dict[str, Any]:
+		raise NotImplementedError("VTU.ng electricity providers integration is not implemented yet.")
+
+	async def verify_electricity(self, *, meter_number: str, provider: str) -> dict[str, Any]:
+		raise NotImplementedError("VTU.ng electricity verification is not implemented yet.")
+
+	async def fetch_cable_tv_providers(self) -> dict[str, Any]:
+		raise NotImplementedError("VTU.ng cable TV providers integration is not implemented yet.")
+
+	async def fetch_cable_tv_bouquets(self, *, provider_code: str) -> dict[str, Any]:
+		raise NotImplementedError("VTU.ng cable TV bouquets integration is not implemented yet.")
+
+	async def verify_cable_tv(self, *, smart_card_number: str, provider_code: str, phone: str) -> dict[str, Any]:
+		raise NotImplementedError("VTU.ng cable TV verification is not implemented yet.")
+
+	async def get_education_price(self, *, service_id: str | int) -> dict[str, Any]:
+		raise NotImplementedError("VTU.ng education pricing is not implemented yet.")
+
+	async def buy_education_pins(
+		self,
+		*,
+		service_id: str | int,
+		phone: str,
+		quantity: int,
+		product_code: str,
+	) -> dict[str, Any]:
+		raise NotImplementedError("VTU.ng education pin purchase is not implemented yet.")
+
 	async def buy_airtime(
 		self,
 		*,
@@ -75,7 +106,9 @@ class VTUNGProvider(VTUProvider):
 		self,
 		*,
 		smart_card_number: str,
+		provider_code: str,
 		package: str,
+		package_code: str,
 		amount: float | int,
 		reference: str | None = None,
 	) -> dict[str, Any]:

@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     # VTU Providers
     aidapay_api_key: SecretStr | None = Field(default=None, alias="AIDAPAY_API_KEY")
     aidapay_base_url: str | None = Field(default=None, alias="AIDAPAY_BASE_URL")
+    aidapay_account_pin: SecretStr | None = Field(default=None, alias="AIDAPAY_ACCOUNT_PIN")
     vtung_api_key: SecretStr | None = Field(default=None, alias="VTUNG_API_KEY")
     vtung_base_url: str | None = Field(default=None, alias="VTUNG_BASE_URL")
     clubkonnect_api_key: SecretStr | None = Field(default=None, alias="CLUBKONNECT_API_KEY")

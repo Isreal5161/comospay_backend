@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from typing import Any
+import inspect
 
 import httpx
 import pytest
 
 from app.integrations.airtime.aidapay import AidaPayProvider
+from app.integrations.airtime.base_provider import VTUProvider
 from app.integrations.airtime.exceptions import ProviderTemporaryFailure, ProviderUnavailableError
 
 
@@ -145,6 +147,77 @@ async def test_buy_data_success(provider: AidaPayProvider, patch_async_client: _
 
 
 @pytest.mark.asyncio
+async def test_purchase_electricity_success(provider: AidaPayProvider, patch_async_client: _FakeAsyncClient) -> None:
+    patch_async_client.queue = [
+        _FakeResponse(200, {"success": True, "data": [{"provider_name": "IKEDC", "provider_code": "ikedc-meter"}]}),
+        _FakeResponse(
+            200,
+            {
+                "success": True,
+                "message": "success",
+                "data": {"success": True, "transaction_data": {"transaction_hash": "TX-ELEC-001"}},
+            },
+        ),
+    ]
+
+    result = await provider.purchase_electricity(
+        meter_number="12345678901",
+        provider="IKEDC",
+        amount=1000,
+        reference="REF-ELEC-001",
+    )
+
+    assert result["success"] is True
+    buy_call = patch_async_client.calls[-1]
+    assert buy_call["json"]["recipient"] == "12345678901"
+    assert buy_call["json"]["provider_code"] == "ikedc-meter"
+
+
+@pytest.mark.asyncio
+async def test_fetch_electricity_providers_success(provider: AidaPayProvider, patch_async_client: _FakeAsyncClient) -> None:
+    patch_async_client.queue = [
+        _FakeResponse(200, {"success": True, "data": [{"provider_name": "IKEDC", "provider_code": "ikedc-meter"}]}),
+    ]
+
+    result = await provider.fetch_electricity_providers()
+
+    assert result["success"] is True
+    assert result["data"][0]["provider_code"] == "ikedc-meter"
+
+
+@pytest.mark.asyncio
+async def test_fetch_cable_tv_providers_success(provider: AidaPayProvider, patch_async_client: _FakeAsyncClient) -> None:
+    patch_async_client.queue = [
+        _FakeResponse(200, {"success": True, "data": [{"provider_name": "DSTV", "provider_code": "dstv"}]}),
+    ]
+
+    result = await provider.fetch_cable_tv_providers()
+
+    assert result["success"] is True
+    assert result["data"][0]["provider_code"] == "dstv"
+
+
+@pytest.mark.asyncio
+async def test_fetch_cable_tv_bouquets_success(provider: AidaPayProvider, patch_async_client: _FakeAsyncClient) -> None:
+    patch_async_client.queue = [
+        _FakeResponse(
+            200,
+            {
+                "success": True,
+                "data": [
+                    {"package_name": "DSTV Premium", "package_api_code": "dstv-premium", "provider_code": "dstv"}
+                ],
+            },
+        ),
+    ]
+
+    result = await provider.fetch_cable_tv_bouquets(provider_code="dstv")
+
+    assert result["success"] is True
+    assert result["data"][0]["package_api_code"] == "dstv-premium"
+
+
+@pytest.mark.asyncio
 async def test_verify_transaction_success(provider: AidaPayProvider, patch_async_client: _FakeAsyncClient) -> None:
     patch_async_client.queue = [
         _FakeResponse(
@@ -201,7 +274,9 @@ async def test_subscribe_tv_requires_provider_code_and_package_code(provider: Ai
     with pytest.raises(ProviderUnavailableError):
         await provider.subscribe_tv(
             smart_card_number="1234567890",
+            provider_code="",
             package="legacy-unused",
+            package_code="",
             amount=5000,
             reference="REF-TV-001",
         )
@@ -236,6 +311,50 @@ async def test_subscribe_tv_success_with_explicit_provider_and_package_codes(
     buy_call = patch_async_client.calls[-1]
     assert buy_call["json"]["provider_code"] == "dstv"
     assert buy_call["json"]["package_code"] == "dstv-compact"
+
+
+@pytest.mark.asyncio
+async def test_missing_account_pin_configuration_marks_provider_unavailable_and_blocks_purchase(
+) -> None:
+    provider = AidaPayProvider(api_key="token", base_url="https://www.aidapay.ng/api/v1", account_pin=None)
+
+    assert provider.is_available is False
+
+    with pytest.raises(ProviderUnavailableError):
+        await provider.purchase_electricity(
+            meter_number="12345678901",
+            provider="IKEDC",
+            amount=1000,
+            reference="REF-ELEC-002",
+        )
+
+
+@pytest.mark.asyncio
+async def test_provider_manager_wrapper_shape_is_compatible_with_aidapay_responses(
+    provider: AidaPayProvider,
+    patch_async_client: _FakeAsyncClient,
+) -> None:
+    patch_async_client.queue = [
+        _FakeResponse(200, {"success": True, "data": {"balance": 15000}}),
+    ]
+
+    result = await provider.check_balance()
+    wrapped = {"provider": provider.name, "data": result}
+
+    assert wrapped["provider"] == "aidapay"
+    assert wrapped["data"]["success"] is True
+
+
+def test_subscribe_tv_signature_requires_provider_code_and_package_code() -> None:
+    base_signature = inspect.signature(VTUProvider.subscribe_tv)
+    aida_signature = inspect.signature(AidaPayProvider.subscribe_tv)
+
+    assert "provider_code" in base_signature.parameters
+    assert "package_code" in base_signature.parameters
+    assert base_signature.parameters["provider_code"].default is inspect._empty
+    assert base_signature.parameters["package_code"].default is inspect._empty
+    assert "provider_code" in aida_signature.parameters
+    assert "package_code" in aida_signature.parameters
 
 
 @pytest.mark.asyncio

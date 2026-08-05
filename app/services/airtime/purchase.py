@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from app.models.provider import Provider
 from app.models.transaction import Transaction
 from app.models.wallet import Wallet
+from app.integrations.airtime.manager import ProviderManager
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
@@ -25,6 +26,7 @@ class AirtimePurchaseService:
         *,
         wallet_service: WalletService,
         provider_service: ProviderService,
+        provider_manager: ProviderManager | None = None,
         transaction_repository: TransactionRepository,
         user_repository: UserRepository,
         wallet_repository: WalletRepository,
@@ -32,6 +34,7 @@ class AirtimePurchaseService:
     ) -> None:
         self.wallet_service = wallet_service
         self.provider_service = provider_service
+        self.provider_manager = provider_manager or ProviderManager()
         self.transaction_repository = transaction_repository
         self.user_repository = user_repository
         self.wallet_repository = wallet_repository
@@ -44,6 +47,7 @@ class AirtimePurchaseService:
         phone_number: str,
         amount: Decimal | float | int,
         transaction_pin: str,
+        network: str | None = None,
         wallet_id: UUID | None = None,
         currency: str = "NGN",
         description: str | None = None,
@@ -54,9 +58,6 @@ class AirtimePurchaseService:
         """Create a new airtime purchase, debit the wallet, and dispatch it through provider orchestration."""
         amount_value = self._normalize_amount(amount)
         self._validate_purchase_request(user_id=user_id, phone_number=phone_number, amount=amount_value, transaction_pin=transaction_pin)
-
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required for airtime purchases.")
 
         await self._ensure_user_exists(user_id)
         wallet = await self._resolve_wallet(user_id=user_id, wallet_id=wallet_id)
@@ -85,14 +86,14 @@ class AirtimePurchaseService:
                 status="pending",
                 provider_name=provider_name,
                 description=description or f"Airtime purchase for {phone_number}",
-                metadata_payload=self._serialize_metadata({"phone_number": phone_number, "wallet_id": str(wallet.id)}),
+                metadata_payload=self._serialize_metadata({"phone_number": phone_number, "network": network, "wallet_id": str(wallet.id)}),
             )
             transaction = await self.transaction_repository.create_transaction(transaction)
             await self._debit_wallet(transaction=transaction, wallet=wallet, amount=amount_value)
 
         return await self.process_airtime_purchase(
             transaction=transaction,
-            provider_operation=provider_operation,
+            network=network,
             provider_name=provider_name,
             metadata_payload=metadata_payload,
         )
@@ -102,31 +103,23 @@ class AirtimePurchaseService:
         *,
         transaction: Transaction | None = None,
         reference: str | None = None,
-        provider_operation: Callable[[Provider], Awaitable[Any]] | None = None,
+        network: str | None = None,
         provider_name: str | None = None,
         metadata_payload: str | None = None,
     ) -> dict[str, Any]:
         """Dispatch a pending airtime purchase to the provider and update its outcome."""
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required for airtime processing.")
 
         self.logger.info("airtime_purchase_provider_execution", extra={"reference": resolved.reference})
         try:
-            provider_response = await self.provider_service.execute_airtime(
-                operation=provider_operation,
-                validate=self._validate_provider_payload,
-                normalize=self._normalize_provider_response,
-                payload={
-                    "reference": resolved.reference,
-                    "phone_number": self._extract_phone_number(resolved),
-                    "amount": str(resolved.amount),
-                    "currency": resolved.currency,
-                    "wallet_id": str(resolved.wallet_id) if resolved.wallet_id else None,
-                    "user_id": str(resolved.user_id),
-                    "description": resolved.description,
-                    "metadata_payload": metadata_payload,
-                },
+            provider_response = self._normalize_provider_manager_response(
+                await self.provider_manager.execute(
+                    "buy_airtime",
+                    phone_number=self._extract_phone_number(resolved),
+                    network=network or self._extract_network(resolved),
+                    amount=str(resolved.amount),
+                    reference=resolved.reference,
+                )
             )
         except Exception as exc:
             await self._handle_provider_failure(transaction=resolved, reason=str(exc))
@@ -139,7 +132,7 @@ class AirtimePurchaseService:
                 raise ValidationException("Purchase transaction was not found.")
 
             transaction_record.status = status
-            transaction_record.provider_name = provider_name or provider_response.get("provider", {}).get("name") or transaction_record.provider_name
+            transaction_record.provider_name = provider_name or provider_response.get("provider") or transaction_record.provider_name
             transaction_record.provider_reference = provider_response.get("provider_reference") or transaction_record.provider_reference
             transaction_record.provider_transaction_id = provider_response.get("provider_transaction_id") or transaction_record.provider_transaction_id
             transaction_record.external_reference = transaction_record.provider_reference
@@ -187,7 +180,7 @@ class AirtimePurchaseService:
         *,
         transaction: Transaction | None = None,
         reference: str | None = None,
-        provider_operation: Callable[[Provider], Awaitable[Any]] | None = None,
+        network: str | None = None,
         provider_name: str | None = None,
         metadata_payload: str | None = None,
     ) -> dict[str, Any]:
@@ -195,8 +188,6 @@ class AirtimePurchaseService:
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
         if resolved.status in {"succeeded", "completed", "settled"}:
             return await self._build_response(resolved)
-        if provider_operation is None:
-            raise ValidationException("A provider operation callback is required for airtime retries.")
 
         wallet = await self._get_wallet_for_transaction(resolved)
         if resolved.status in {"failed", "cancelled", "reversed"}:
@@ -204,7 +195,7 @@ class AirtimePurchaseService:
         self.logger.info("airtime_purchase_retry", extra={"reference": resolved.reference, "status": resolved.status})
         return await self.process_airtime_purchase(
             transaction=resolved,
-            provider_operation=provider_operation,
+            network=network or self._extract_network(resolved),
             provider_name=provider_name,
             metadata_payload=metadata_payload,
         )
@@ -371,6 +362,53 @@ class AirtimePurchaseService:
             "metadata": payload.get("metadata"),
         }
 
+    def _normalize_provider_manager_response(self, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise ValidationException("Provider response is invalid.")
+
+        provider_name = result.get("provider")
+        payload = result.get("data") if isinstance(result.get("data"), dict) else result
+
+        transaction_container = None
+        if isinstance(payload, dict):
+            if isinstance(payload.get("transaction_data"), dict):
+                transaction_container = payload.get("transaction_data")
+            elif isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("transaction_data"), dict):
+                transaction_container = payload["data"]["transaction_data"]
+
+        response_data = transaction_container or payload
+
+        status_value = response_data.get("status") if isinstance(response_data, dict) else None
+        if status_value is None and isinstance(payload, dict):
+            status_value = payload.get("status")
+        if status_value is None and isinstance(result.get("success"), bool):
+            status_value = "succeeded" if result.get("success") is True else "failed"
+
+        provider_reference = None
+        provider_transaction_id = None
+        message = None
+        metadata: dict[str, Any] | Any = response_data
+        if isinstance(response_data, dict):
+            provider_reference = response_data.get("transaction_hash") or response_data.get("ref")
+            provider_transaction_id = response_data.get("transaction_id") or response_data.get("transaction_hash")
+            message = response_data.get("message")
+
+        if provider_reference is None and isinstance(payload, dict):
+            provider_reference = payload.get("provider_reference") or payload.get("ref")
+        if provider_transaction_id is None and isinstance(payload, dict):
+            provider_transaction_id = payload.get("provider_transaction_id")
+        if message is None and isinstance(payload, dict):
+            message = payload.get("message")
+
+        return {
+            "status": self._normalize_status(status_value),
+            "provider": provider_name or (response_data.get("provider") if isinstance(response_data, dict) else None),
+            "provider_reference": provider_reference,
+            "provider_transaction_id": provider_transaction_id,
+            "message": message or result.get("message"),
+            "metadata": metadata,
+        }
+
     def _normalize_status(self, status: str | None) -> str:
         if not status:
             return "pending"
@@ -411,6 +449,13 @@ class AirtimePurchaseService:
     def _extract_phone_number(self, transaction: Transaction) -> str | None:
         metadata = self._parse_metadata(transaction.metadata_payload)
         return metadata.get("phone_number")
+
+    def _extract_network(self, transaction: Transaction) -> str | None:
+        metadata = self._parse_metadata(transaction.metadata_payload)
+        network = metadata.get("network")
+        if isinstance(network, str) and network.strip():
+            return network.strip()
+        return None
 
     def _normalize_amount(self, amount: Decimal | float | int) -> Decimal:
         if isinstance(amount, Decimal):
