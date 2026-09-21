@@ -28,6 +28,20 @@ class BankAccountRepository:
         result = await self.session.execute(select(BankAccount).where(BankAccount.id == bank_account_id))
         return result.scalar_one_or_none()
 
+    async def get_by_id_for_user_for_update(
+        self,
+        *,
+        bank_account_id: UUID,
+        user_id: UUID,
+    ) -> BankAccount | None:
+        """Retrieve an account only when owned by the user, while locking it."""
+        result = await self.session.execute(
+            select(BankAccount)
+            .where(BankAccount.id == bank_account_id, BankAccount.user_id == user_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def get_user_accounts(
         self,
         *,

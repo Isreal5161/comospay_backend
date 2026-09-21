@@ -39,6 +39,7 @@ class WebhookController:
         self.router.post("/transfer", status_code=status.HTTP_200_OK)(self.handle_transfer_webhook)
         self.router.post("/provider", status_code=status.HTTP_200_OK)(self.handle_provider_webhook)
         self.router.post("/notification", status_code=status.HTTP_200_OK)(self.handle_notification_webhook)
+        self.router.post("/giftcard", status_code=status.HTTP_200_OK)(self.handle_giftcard_webhook)
 
     async def handle_payment_webhook(self, request: Request) -> dict[str, Any]:
         """Handle payment provider webhook requests."""
@@ -137,6 +138,76 @@ class WebhookController:
             handler=self.webhook_service.process_notification_webhook,
             payload={"payload": payload.get("payload", payload)},
             success_message="Notification webhook processed successfully.",
+        )
+
+    async def handle_giftcard_webhook(self, request: Request) -> dict[str, Any]:
+        """Handle a generic Gift Card provider webhook request."""
+        payload, raw_body = await self._read_payload(request)
+        provider_name = self._extract_header(request, "x-provider-name") or payload.get("provider_name") or payload.get("provider")
+        if not provider_name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Gift Card webhook provider is required.")
+        signature = self._extract_header(request, "x-webhook-signature") or payload.get("signature")
+        timestamp = self._extract_header(request, "x-webhook-timestamp") or payload.get("timestamp")
+        configured_secret = self._resolve_configured_secret(provider_name)
+        await self._verify_request_signature(raw_body=raw_body, signature=signature, timestamp=timestamp, secret=configured_secret)
+        return await self._execute(
+            action="handle_giftcard_webhook",
+            handler=self.webhook_service.process_giftcard_webhook,
+            payload={
+                "provider_name": str(provider_name),
+                "event_id": payload.get("event_id"),
+                "payload": payload.get("payload", payload),
+            },
+            success_message="Gift Card webhook processed successfully.",
+        )
+
+    async def handle_sogo_giftcard_webhook(self, request: Request) -> dict[str, Any]:
+        """Handle the Sogo gift-card webhook contract: provider-specific endpoint and signature header."""
+        payload, raw_body = await self._read_payload(request)
+        required_fields = {"event_type", "reference", "provider_reference", "status"}
+        missing = sorted(required_fields - set(payload.keys()))
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Sogo webhook payload is missing required fields: {', '.join(missing)}",
+            )
+
+        signature = self._extract_header(request, "x-sogo-signature")
+        configured_secret = self._resolve_configured_secret("sogo")
+        if not configured_secret:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sogo webhook secret is not configured.")
+        if not signature:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sogo webhook signature is required.")
+
+        try:
+            security_service = getattr(self.webhook_service, "security_service", None)
+            if security_service is not None and hasattr(security_service, "verify_sogo_signature"):
+                is_valid = await security_service.verify_sogo_signature(
+                    payload=raw_body,
+                    signature=signature,
+                    secret=configured_secret,
+                )
+            else:
+                normalized = signature.strip()
+                if normalized.lower().startswith("hmac-sha256="):
+                    normalized = normalized.split("=", 1)[1].strip()
+                expected = __import__("hmac").new(configured_secret.encode("utf-8"), raw_body, __import__("hashlib").sha256).hexdigest()
+                is_valid = __import__("hmac").compare_digest(expected, normalized)
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sogo webhook signature is invalid.") from exc
+
+        if not is_valid:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sogo webhook signature is invalid.")
+
+        return await self._execute(
+            action="handle_sogo_giftcard_webhook",
+            handler=self.webhook_service.process_giftcard_webhook,
+            payload={
+                "provider_name": "sogo",
+                "event_id": payload.get("event_id") or payload.get("reference"),
+                "payload": payload,
+            },
+            success_message="Sogo webhook processed successfully.",
         )
 
     async def _read_payload(self, request: Request) -> tuple[dict[str, Any], bytes]:

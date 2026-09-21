@@ -25,7 +25,7 @@ pip install -r requirements.txt
 
 ### Start Command
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
 ### Health Check Path
@@ -44,25 +44,26 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 **Liveness Endpoint:** `/live`
 
 ### Python Version
-- **Required:** Python 3.11 or 3.12
-- **Tested:** Python 3.14.0
-- **Render Setting:** Set to Python 3.12 for broad compatibility
+- **Tested locally:** Python 3.13.5
+- **Render Setting:** Pin Render to the tested Python 3.13 runtime where supported
 
 ---
 
 ## REQUIRED ENVIRONMENT VARIABLES
 
 **INFRASTRUCTURE:**
-- `APP_ENV=staging`
+- `APP_ENV=production`
 - `DEBUG=false`
 - `DATABASE_URL` — Supabase PostgreSQL async connection string (required)
 - `REDIS_URL` — Redis staging instance (required)
 - `HOST=0.0.0.0`
-- `PORT=8000`
+- `PORT` — supplied by Render; the start command uses `$PORT`
 
 **SECURITY:**
 - `JWT_SECRET_KEY` — Minimum 32 characters, NOT a development value (required)
 - `JWT_ALGORITHM=HS256`
+- `BANK_ACCOUNT_ENCRYPTION_KEY` — URL-safe base64-encoded 32-byte production key (required)
+- `BANK_ACCOUNT_ENCRYPTION_KEY_VERSION` — Active encryption key version (required)
 - `ACCESS_TOKEN_EXPIRE_MINUTES=60`
 - `REFRESH_TOKEN_EXPIRE_DAYS=30`
 
@@ -171,11 +172,11 @@ postgresql+asyncpg://user:password@host:5432/database_name
 1. `a1b2c3_add_virtual_account_provisioning_fields.py` — Adds provisioning lifecycle columns
 2. `scal006_add_provider_ref_uniqueness.py` — Adds provider reference constraints
 
-**Migration Command for Render (Optional):**
+**Migration Command for Render (Required before application traffic):**
 
 If migrations need to be run:
 ```bash
-# Before starting the application for the first time on Render
+# Run against the intended production PostgreSQL database before enabling traffic
 alembic upgrade head
 ```
 
@@ -427,14 +428,16 @@ async def startup_event() -> None:
 
 Before deployment to Render, configure these in Render's dashboard:
 
-- [ ] Set Python version to 3.12
+- [ ] Set Python version to the tested Python 3.13 runtime where supported
 - [ ] Set Build command: `pip install -r requirements.txt`
-- [ ] Set Start command: `uvicorn app.main:app --host 0.0.0.0 --port 8000`
+- [ ] Set Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 - [ ] Set Health check path: `/health`
-- [ ] Set `APP_ENV=staging`
+- [ ] Set `APP_ENV=production`
 - [ ] Set `DEBUG=false`
 - [ ] Set `DATABASE_URL` to Supabase staging PostgreSQL
 - [ ] Set `REDIS_URL` to staging Redis instance
+- [ ] Set `BANK_ACCOUNT_ENCRYPTION_KEY` in Render secrets
+- [ ] Set `BANK_ACCOUNT_ENCRYPTION_KEY_VERSION`
 - [ ] Set `JWT_SECRET_KEY` to a secure 32+ character value
 - [ ] Set `CORS_ALLOW_ORIGINS` to frontend staging URL
 - [ ] Set `TRUSTED_HOSTS` to staging domain names

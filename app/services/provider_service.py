@@ -366,6 +366,7 @@ class ProviderService:
         self,
         *,
         operation: Callable[[Provider], Awaitable[T]],
+        provider_name: str | None = None,
         environment: str | None = None,
         use_cache: bool = True,
         retryable_errors: tuple[type[BaseException], ...] | None = None,
@@ -377,7 +378,7 @@ class ProviderService:
         return await self.execute_provider(
             category="Email",
             operation=operation,
-            service_type="email",
+            service_type=provider_name or "email",
             environment=environment,
             use_cache=use_cache,
             retryable_errors=retryable_errors,

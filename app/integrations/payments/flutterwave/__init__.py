@@ -1,6 +1,7 @@
 """Public package interface for the Flutterwave integration layer."""
 
 from app.integrations.payments.flutterwave.client import FlutterwaveClient
+from app.integrations.payments.flutterwave.withdrawal import FlutterwaveWithdrawalProvider
 
 
 class FlutterwaveAuthentication:
@@ -55,4 +56,5 @@ __all__ = [
     "FlutterwaveRequestError",
     "FlutterwaveServerError",
     "FlutterwaveValidationError",
+    "FlutterwaveWithdrawalProvider",
 ]

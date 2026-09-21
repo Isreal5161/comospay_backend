@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from urllib.parse import urlencode
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from uuid import UUID, uuid4
@@ -1181,10 +1182,13 @@ class AuthService:
 
         try:
             if self.notification_service is not None and hasattr(self.notification_service, "send_password_reset_email"):
+                reset_url = f"{settings.frontend_url.rstrip('/')}/reset-password?{urlencode({'token': reset_token})}"
                 await self.notification_service.send_password_reset_email(
                     recipients=user.email,
-                    reset_token=reset_token,
+                    reset_url=reset_url,
+                    token=reset_token,
                     user_name=user.first_name or user.username or user.email,
+                    expires_in_minutes=getattr(settings, "password_reset_ttl_minutes", 30),
                 )
         except Exception as exc:
             raise DatabaseException("Password reset request failed.") from exc

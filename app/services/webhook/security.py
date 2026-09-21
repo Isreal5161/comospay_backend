@@ -29,6 +29,22 @@ class WebhookSecurityService:
             raise ValidationException("Webhook signature validation failed.")
         return True
 
+    async def verify_sogo_signature(self, *, payload: bytes, signature: str | None, secret: str | None) -> bool:
+        if not payload:
+            raise ValidationException("Webhook payload is required.")
+        if not secret:
+            raise ValidationException("Webhook secret is required.")
+        if not signature:
+            raise ValidationException("Webhook signature is required.")
+
+        normalized = signature.strip()
+        if normalized.lower().startswith("hmac-sha256="):
+            normalized = normalized.split("=", 1)[1].strip()
+        expected = self._compute_signature(payload=payload, secret=secret)
+        if not hmac.compare_digest(expected, normalized):
+            raise ValidationException("Webhook signature validation failed.")
+        return True
+
     async def validate_request(self, *, payload: dict[str, Any], provider_name: str | None = None, timestamp: str | None = None, secret: str | None = None) -> dict[str, Any]:
         if not isinstance(payload, dict) or not payload:
             raise ValidationException("Webhook payload must be a non-empty object.")

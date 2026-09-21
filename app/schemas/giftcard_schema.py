@@ -1,9 +1,43 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class GiftCardSellSubmission(BaseModel):
+    """Provider-neutral, request-scoped data for a gift-card sell submission."""
+
+    brand_slug: str = Field(..., min_length=1, max_length=100)
+    card_country: str = Field(..., min_length=2, max_length=3)
+    card_type: str = Field(..., pattern="^(ecode|physical)$")
+    card_currency: str = Field(..., min_length=3, max_length=3)
+    card_amount: float = Field(..., gt=0, le=99999)
+    additional_info: str | None = Field(default=None, min_length=10, max_length=1000)
+    sub_type: str | None = Field(default=None, max_length=100)
+    payout_currency: str = Field(default="NGN", min_length=3, max_length=3)
+    specific_country: str | None = Field(default=None, max_length=100)
+    images: list[Any] | None = Field(default=None, max_length=5)
+
+    @model_validator(mode="after")
+    def validate_conditional_fields(self) -> "GiftCardSellSubmission":
+        if self.card_type == "ecode" and self.additional_info is None:
+            raise ValueError("additional_info is required for ecode submissions.")
+        if self.card_type == "physical":
+            if not self.images or not 1 <= len(self.images) <= 5:
+                raise ValueError("physical submissions require 1 to 5 images.")
+            for image in self.images:
+                content_type = getattr(image, "content_type", None)
+                if content_type not in {"image/jpeg", "image/png"}:
+                    raise ValueError("physical images must be JPEG or PNG.")
+                size = getattr(image, "size", None)
+                if size is not None and size > 2 * 1024 * 1024:
+                    raise ValueError("physical images must not exceed 2 MB.")
+        if self.card_country.upper() == "EU" and not self.specific_country:
+            raise ValueError("specific_country is required for EU cards.")
+        return self
 
 
 class GiftCardCreateSchema(BaseModel):

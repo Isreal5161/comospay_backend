@@ -7,11 +7,13 @@ from uuid import UUID
 
 from app.models.provider import Provider
 from app.models.transaction import Transaction
+from app.schemas.giftcard_schema import GiftCardSellSubmission
 from app.services.giftcard.pricing import GiftCardPricingService
 from app.services.giftcard.reconciliation import GiftCardReconciliationService
 from app.services.giftcard.settlement import GiftCardSettlementService
 from app.services.giftcard.trading import GiftCardTradingService
 from app.services.giftcard.valuation import GiftCardValuationService
+from app.utils.exceptions import ValidationException
 
 
 class GiftCardService:
@@ -25,6 +27,7 @@ class GiftCardService:
         pricing_service: GiftCardPricingService,
         settlement_service: GiftCardSettlementService,
         reconciliation_service: GiftCardReconciliationService,
+        provider_integration_builder: Callable[[Provider], Any] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.trading_service = trading_service
@@ -32,7 +35,59 @@ class GiftCardService:
         self.pricing_service = pricing_service
         self.settlement_service = settlement_service
         self.reconciliation_service = reconciliation_service
+        self.provider_integration_builder = provider_integration_builder
         self.logger = logger or logging.getLogger(__name__)
+
+    def build_provider_operation(
+        self,
+        *,
+        operation: str,
+        payload: dict[str, Any],
+        provider_name: str | None = None,
+    ) -> Callable[[Provider], Awaitable[Any]]:
+        """Build a provider callback for the shared Gift Card execution flow."""
+
+        async def provider_operation(provider: Provider) -> Any:
+            integration = self._build_provider_integration(provider=provider, provider_name=provider_name)
+            if integration is None:
+                raise ValidationException("No provider integration is available for the selected provider.")
+
+            if operation in {"buy", "sell", "submit"}:
+                return await integration.submit_card(card_data=payload)
+            if operation in {"status", "get_status", "reconcile"}:
+                return await integration.get_transaction_status(
+                    provider_reference=payload.get("provider_reference")
+                )
+            if operation == "verify":
+                return await integration.verify_card(card_data=payload)
+            if operation in {"valuation", "exchange_rate"}:
+                return await integration.get_exchange_rate(
+                    card_type=str(payload.get("card_type") or ""),
+                    country=payload.get("country"),
+                    currency=payload.get("currency"),
+                    amount=payload.get("amount"),
+                )
+            if operation == "supported_cards":
+                return await integration.get_supported_cards()
+            if operation == "health_check":
+                return await integration.health_check()
+            raise ValidationException("Unsupported Gift Card provider operation.")
+
+        return provider_operation
+
+    def _build_provider_integration(
+        self,
+        *,
+        provider: Provider,
+        provider_name: str | None = None,
+    ) -> Any | None:
+        """Resolve the selected provider's integration without performing I/O."""
+        if self.provider_integration_builder is None:
+            return None
+        resolved_name = (provider_name or provider.code or provider.name or "").strip().lower()
+        if not resolved_name:
+            return None
+        return self.provider_integration_builder(provider)
 
     async def buy_giftcard(
         self,
@@ -53,6 +108,22 @@ class GiftCardService:
     ) -> dict[str, Any]:
         """Delegate gift card purchase initiation to the trading service."""
         self._log_entry("buy_giftcard", user_id=user_id, brand=brand, card_type=card_type)
+        operation = provider_operation or self.build_provider_operation(
+            operation="buy",
+            payload={
+                "reference": reference,
+                "brand": brand,
+                "card_type": card_type,
+                "amount": str(amount),
+                "currency": currency,
+                "country": country,
+                "user_id": str(user_id),
+                "wallet_id": str(wallet_id) if wallet_id else None,
+                "description": description,
+                "metadata_payload": metadata_payload,
+            },
+            provider_name=provider_name,
+        )
         result = await self.trading_service.buy_giftcard(
             user_id=user_id,
             brand=brand,
@@ -64,7 +135,7 @@ class GiftCardService:
             wallet_id=wallet_id,
             description=description,
             provider_name=provider_name,
-            provider_operation=provider_operation,
+            provider_operation=operation,
             metadata_payload=metadata_payload,
             reference=reference,
         )
@@ -87,6 +158,7 @@ class GiftCardService:
         provider_operation: Callable[[Provider], Awaitable[Any]] | None = None,
         metadata_payload: str | None = None,
         reference: str | None = None,
+        submission: GiftCardSellSubmission | None = None,
     ) -> dict[str, Any]:
         """Delegate gift card sell initiation to the trading service."""
         self._log_entry("sell_giftcard", user_id=user_id, brand=brand, card_type=card_type)
@@ -104,6 +176,7 @@ class GiftCardService:
             provider_operation=provider_operation,
             metadata_payload=metadata_payload,
             reference=reference,
+            submission=submission,
         )
         self._log_completion("sell_giftcard", reference=result.get("reference"))
         return result

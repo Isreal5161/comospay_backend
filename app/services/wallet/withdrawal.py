@@ -1,25 +1,28 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import re
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.provider import Provider
 from app.models.transaction import Transaction
 from app.models.wallet import Wallet
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.user.bank_account import BankAccountService
 from app.utils.exceptions import DatabaseException, ProviderException, ValidationException, WalletException
 
 
 class WalletWithdrawalService:
-    """Coordinate wallet withdrawal workflows through provider and payment services."""
+    """Reserve wallet funds for a future provider-independent withdrawal."""
 
     MIN_AMOUNT = Decimal("0.01")
     MAX_AMOUNT = Decimal("999999999.99")
@@ -30,7 +33,10 @@ class WalletWithdrawalService:
         *,
         wallet_repository: WalletRepository,
         transaction_repository: TransactionRepository,
+        bank_account_service: BankAccountService | None = None,
         provider_service: Any | None = None,
+        provider_adapter: Any | None = None,
+        provider_adapter_factory: Callable[[Provider], Any] | None = None,
         session: AsyncSession | None = None,
         logger: logging.Logger | None = None,
         audit_service: Any | None = None,
@@ -38,93 +44,82 @@ class WalletWithdrawalService:
         self.wallet_repository = wallet_repository
         self.transaction_repository = transaction_repository
         self.provider_service = provider_service
+        self.provider_adapter = provider_adapter
+        self.provider_adapter_factory = provider_adapter_factory
+        self.bank_account_service = bank_account_service
         self.session = session
         self.logger = logger or logging.getLogger(__name__)
         self.audit_service = audit_service
 
-    async def withdraw_to_bank(
+    async def create_withdrawal(
         self,
         *,
         user_id: UUID,
-        wallet_id: UUID,
         amount: Decimal | float | int,
-        bank_code: str,
-        account_number: str,
-        account_name: str | None = None,
-        transaction_pin: str | None = None,
+        currency: str,
+        bank_account_id: UUID,
         description: str | None = None,
         metadata_payload: str | None = None,
-        provider_name: str = "flutterwave",
     ) -> dict[str, Any]:
-        """Withdraw funds from a wallet to a bank account through a provider abstraction."""
+        """Reserve funds and create a withdrawal transaction without calling a provider."""
         self._require_repository(self.wallet_repository)
         self._require_repository(self.transaction_repository)
-        self._require_dependency(self.provider_service, "provider_service")
 
         amount_value = self._normalize_amount(amount)
-        await self.validate_withdrawal(wallet_id=wallet_id, amount=amount_value, transaction_pin=transaction_pin)
+        normalized_currency = currency.strip().upper()
+        if not normalized_currency or len(normalized_currency) > 10:
+            raise ValidationException("Withdrawal currency is invalid.")
+        if self.bank_account_service is None:
+            raise ValidationException("Trusted bank account service is not configured.")
+        self._validate_amount(amount_value)
         await self.validate_daily_limit(user_id=user_id, amount=amount_value)
 
         try:
             async with self._session_scope():
-                wallet = await self._load_wallet_for_update(wallet_id)
+                wallet = await self._load_user_wallet_for_update(user_id)
                 if wallet is None:
-                    raise ValidationException("Wallet not found.")
-                if wallet.user_id != user_id:
-                    raise WalletException("Wallet ownership mismatch.")
+                    raise ValidationException("Wallet not found for authenticated user.")
                 if wallet.is_frozen or wallet.is_suspended or not wallet.is_active:
                     raise WalletException("Wallet is not active for withdrawal.")
+                if wallet.currency.upper() != normalized_currency:
+                    raise ValidationException("Withdrawal currency does not match wallet currency.")
+                if wallet.available_balance < amount_value:
+                    raise WalletException("Insufficient wallet balance.")
+                bank_account = await self.bank_account_service.resolve_withdrawal_account(
+                    user_id=user_id,
+                    bank_account_id=bank_account_id,
+                )
 
+                fee = await self.calculate_withdrawal_fee(amount=amount_value)
+                metadata = json.dumps(
+                    {
+                        "bank_account_id": str(bank_account_id),
+                        "account_number_last4": bank_account["account_number"][-4:],
+                    }
+                )
                 transaction = Transaction(
                     reference=self._make_reference("wdl"),
                     user_id=user_id,
                     wallet_id=wallet.id,
+                    bank_account_id=bank_account_id,
                     transaction_type="wallet_withdrawal_bank",
                     category="withdrawal",
                     amount=amount_value,
                     currency=wallet.currency,
-                    charges=await self.calculate_withdrawal_fee(amount=amount_value),
-                    total_amount=amount_value + (await self.calculate_withdrawal_fee(amount=amount_value)),
-                    status="pending",
+                    charges=fee,
+                    total_amount=amount_value + fee,
+                    status="funds_reserved",
                     description=description or "Bank withdrawal",
-                    metadata_payload=self._sanitize_metadata(metadata_payload),
+                    metadata_payload=metadata,
+                )
+                wallet.available_balance -= amount_value
+                wallet.locked_balance += amount_value
+                await self.wallet_repository.update_balance_fields(
+                    wallet,
+                    available_balance=wallet.available_balance,
+                    locked_balance=wallet.locked_balance,
                 )
                 await self.transaction_repository.create_transaction(transaction)
-
-                provider_payload = await self._dispatch_provider_call(
-                    "withdraw_to_bank",
-                    user_id=user_id,
-                    wallet_id=wallet.id,
-                    amount=amount_value,
-                    bank_code=bank_code,
-                    account_number=account_number,
-                    account_name=account_name,
-                    reference=transaction.reference,
-                    provider_name=provider_name,
-                )
-                transaction.provider_name = provider_name
-                transaction.provider_reference = provider_payload.get("provider_reference") or transaction.provider_reference
-                transaction.external_reference = provider_payload.get("external_reference") or transaction.external_reference
-                transaction.metadata_payload = self._merge_metadata(transaction.metadata_payload, provider_payload)
-
-                if provider_payload.get("status") in {"completed", "success", "successful", "succeeded"}:
-                    await self.debit_wallet(wallet_id=wallet.id, amount=amount_value, transaction=transaction, reference=transaction.reference)
-                    transaction.status = "completed"
-                    await self.transaction_repository.update_transaction(transaction, status=transaction.status, metadata_payload=transaction.metadata_payload)
-                    await self._log_event("withdrawal_to_bank_completed", user_id=user_id, metadata={"reference": transaction.reference})
-                    return {
-                        "transaction_id": str(transaction.id),
-                        "reference": transaction.reference,
-                        "status": transaction.status,
-                        "wallet_id": str(wallet.id),
-                        "amount": str(transaction.amount),
-                        "currency": wallet.currency,
-                        "fee": str(transaction.charges),
-                    }
-
-                transaction.status = self._normalize_status(provider_payload.get("status"), default="pending")
-                await self.transaction_repository.update_transaction(transaction, status=transaction.status, metadata_payload=transaction.metadata_payload)
-                await self._log_event("withdrawal_to_bank_pending", user_id=user_id, metadata={"reference": transaction.reference})
                 return {
                     "transaction_id": str(transaction.id),
                     "reference": transaction.reference,
@@ -141,7 +136,298 @@ class WalletWithdrawalService:
         except WalletException:
             raise
         except Exception as exc:
-            raise DatabaseException("Bank withdrawal failed.") from exc
+            raise DatabaseException("Withdrawal reservation failed.") from exc
+
+    async def withdraw_to_bank(self, **kwargs: Any) -> dict[str, Any]:
+        """Backward-compatible alias for the provider-free withdrawal foundation."""
+        return await self.create_withdrawal(**kwargs)
+
+    async def execute_withdrawal(
+        self,
+        *,
+        transaction_id: UUID | None = None,
+        reference: str | None = None,
+        account_details: Mapping[str, Any] | None = None,
+        authenticated_user_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        """Execute one reserved withdrawal and settle its wallet exactly once."""
+        self._require_repository(self.wallet_repository)
+        self._require_repository(self.transaction_repository)
+        if self.provider_service is None or (
+            self.provider_adapter is None and self.provider_adapter_factory is None
+        ):
+            raise ProviderException("Withdrawal provider execution is not configured.")
+
+        try:
+            async with self._session_scope():
+                transaction = await self._get_transaction_for_update(
+                    transaction_id=transaction_id,
+                    reference=reference,
+                )
+                if transaction is None:
+                    raise ValidationException("Withdrawal transaction not found.")
+                if transaction.category != "withdrawal":
+                    raise ValidationException("Transaction is not a withdrawal.")
+                if authenticated_user_id is not None and transaction.user_id != authenticated_user_id:
+                    raise WalletException("Withdrawal ownership mismatch.")
+                if transaction.status == "completed":
+                    return self._withdrawal_result(transaction)
+                if transaction.status == "failed":
+                    return self._withdrawal_result(transaction)
+                if transaction.status not in {"funds_reserved", "pending", "processing"}:
+                    raise WalletException("Withdrawal is not eligible for execution.")
+
+                if account_details is not None:
+                    raise ValidationException("Beneficiary details must come from the trusted bank account.")
+                beneficiary = await self._resolve_transaction_account(transaction)
+                transaction.status = "processing"
+                await self.transaction_repository.update_transaction(transaction, status="processing")
+
+                try:
+                    provider_result = await self.provider_service.execute_transfer(
+                        operation=lambda provider: self._resolve_provider_adapter(provider).transfer(
+                            account_details=beneficiary,
+                            amount=transaction.amount,
+                            reference=transaction.reference,
+                        ),
+                        retryable_errors=(),
+                        payload={"reference": transaction.reference},
+                    )
+                except Exception as exc:
+                    if self._is_ambiguous_provider_error(exc):
+                        transaction.status = "pending"
+                        transaction.metadata_payload = self._merge_metadata(
+                            transaction.metadata_payload,
+                            {"provider_outcome": "unknown", "provider_error_type": type(exc).__name__},
+                        )
+                        await self.transaction_repository.update_transaction(
+                            transaction,
+                            status="pending",
+                            metadata_payload=transaction.metadata_payload,
+                        )
+                        return self._withdrawal_result(transaction)
+
+                    return await self._release_reserved_locked(
+                        transaction,
+                        reason="provider_rejected",
+                        provider_error_type=type(exc).__name__,
+                    )
+
+                normalized = self._unwrap_provider_result(provider_result)
+                provider_status = self._normalize_status(
+                    normalized.get("status"),
+                    default="pending",
+                )
+                self._persist_provider_result(transaction, normalized)
+                if provider_status == "completed":
+                    wallet = await self._load_wallet_for_update(transaction.wallet_id)
+                    if wallet is None:
+                        raise ValidationException("Wallet not found.")
+                    if wallet.locked_balance < transaction.amount:
+                        raise WalletException("Withdrawal reservation is insufficient for settlement.")
+                    wallet.locked_balance -= transaction.amount
+                    wallet.ledger_balance -= transaction.amount
+                    if wallet.available_balance < 0 or wallet.locked_balance < 0:
+                        raise WalletException("Wallet balance cannot be negative.")
+                    await self.wallet_repository.update_balance_fields(
+                        wallet,
+                        ledger_balance=wallet.ledger_balance,
+                        locked_balance=wallet.locked_balance,
+                    )
+                    transaction.status = "completed"
+                    await self.transaction_repository.update_transaction(
+                        transaction,
+                        status="completed",
+                        provider_name=transaction.provider_name,
+                        provider_reference=transaction.provider_reference,
+                        provider_transaction_id=transaction.provider_transaction_id,
+                        payout_amount=transaction.payout_amount,
+                        payout_currency=transaction.payout_currency,
+                        metadata_payload=transaction.metadata_payload,
+                    )
+                    return self._withdrawal_result(transaction)
+                if provider_status == "failed":
+                    return await self._release_reserved_locked(
+                        transaction,
+                        reason="provider_rejected",
+                    )
+
+                transaction.status = "pending"
+                await self.transaction_repository.update_transaction(
+                    transaction,
+                    status="pending",
+                    provider_name=transaction.provider_name,
+                    provider_reference=transaction.provider_reference,
+                    provider_transaction_id=transaction.provider_transaction_id,
+                    metadata_payload=transaction.metadata_payload,
+                )
+                return self._withdrawal_result(transaction)
+        except ValidationException:
+            raise
+        except WalletException:
+            raise
+        except ProviderException:
+            raise
+        except Exception as exc:
+            raise DatabaseException("Withdrawal execution failed.") from exc
+
+    def _validate_amount(self, amount_value: Decimal) -> None:
+        if amount_value <= 0:
+            raise ValidationException("Withdrawal amount must be greater than zero.")
+        if amount_value < self.MIN_AMOUNT:
+            raise ValidationException("Withdrawal amount is too small.")
+        if amount_value > self.MAX_AMOUNT:
+            raise ValidationException("Withdrawal amount exceeds the maximum allowed value.")
+
+    def _resolve_provider_adapter(self, provider: Provider) -> Any:
+        if self.provider_adapter_factory is not None:
+            adapter = self.provider_adapter_factory(provider)
+            if adapter is None:
+                raise ProviderException("No withdrawal integration is available for the selected provider.")
+            return adapter
+        if self.provider_adapter is not None:
+            return self.provider_adapter
+        raise ProviderException("Withdrawal provider integration is not configured.")
+
+    def _resolve_account_details(
+        self,
+        transaction: Transaction,
+        account_details: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if account_details is not None:
+            resolved = dict(account_details)
+        else:
+            resolved = {}
+            if transaction.metadata_payload:
+                try:
+                    metadata = json.loads(transaction.metadata_payload)
+                    if isinstance(metadata, dict):
+                        resolved = dict(metadata.get("beneficiary") or {})
+                except (TypeError, json.JSONDecodeError):
+                    resolved = {}
+        account_number = str(resolved.get("account_number") or "")
+        bank_code = str(resolved.get("account_bank") or resolved.get("bank_code") or "")
+        if not account_number or not account_number.isdigit():
+            raise ValidationException("Trusted withdrawal account details are unavailable.")
+        if not bank_code.strip():
+            raise ValidationException("Trusted withdrawal bank details are unavailable.")
+        if not 6 <= len(account_number) <= 20:
+            raise ValidationException("Trusted withdrawal account details are invalid.")
+        resolved["account_number"] = account_number
+        resolved["bank_code"] = bank_code.strip()
+        resolved.setdefault("currency", transaction.currency)
+        return resolved
+
+    async def _resolve_transaction_account(self, transaction: Transaction) -> dict[str, Any]:
+        if self.bank_account_service is None or transaction.bank_account_id is None:
+            raise ValidationException("Trusted withdrawal bank account is unavailable.")
+        account = await self.bank_account_service.resolve_withdrawal_account(
+            user_id=transaction.user_id,
+            bank_account_id=transaction.bank_account_id,
+        )
+        return {
+            "bank_code": account["bank_code"],
+            "account_number": account["account_number"],
+            "account_name": account.get("account_name"),
+            "currency": transaction.currency,
+        }
+
+    def _unwrap_provider_result(self, provider_result: Any) -> dict[str, Any]:
+        current: Any = provider_result
+        for key in ("result", "data"):
+            if isinstance(current, Mapping) and isinstance(current.get(key), Mapping):
+                current = current[key]
+        return dict(current) if isinstance(current, Mapping) else {}
+
+    def _persist_provider_result(self, transaction: Transaction, result: Mapping[str, Any]) -> None:
+        provider_name = result.get("provider")
+        if isinstance(provider_name, str) and provider_name.strip():
+            transaction.provider_name = provider_name.strip()
+        provider_reference = result.get("provider_reference")
+        if provider_reference is not None:
+            transaction.provider_reference = str(provider_reference)
+        provider_transaction_id = result.get("provider_transaction_id")
+        if provider_transaction_id is not None:
+            transaction.provider_transaction_id = str(provider_transaction_id)
+        settled_amount = result.get("amount")
+        try:
+            transaction.payout_amount = Decimal(str(settled_amount if settled_amount is not None else transaction.amount))
+        except (ArithmeticError, ValueError):
+            transaction.payout_amount = transaction.amount
+        settled_currency = result.get("currency")
+        transaction.payout_currency = str(settled_currency or transaction.currency).upper()
+        status = str(result.get("status") or "pending")[:50]
+        transaction.metadata_payload = self._merge_metadata(
+            transaction.metadata_payload,
+            {"provider_status": status},
+        )
+
+    def _is_ambiguous_provider_error(self, exc: BaseException) -> bool:
+        details = " ".join(
+            [str(exc), type(exc).__name__, str(getattr(exc, "detail", ""))]
+        ).lower()
+        return any(
+            marker in details
+            for marker in ("timeout", "timed out", "connection", "network", "temporarily unavailable")
+        )
+
+    async def _release_reserved_locked(
+        self,
+        transaction: Transaction,
+        *,
+        reason: str,
+        provider_error_type: str | None = None,
+    ) -> dict[str, Any]:
+        if transaction.status == "failed":
+            return self._withdrawal_result(transaction)
+        if transaction.wallet_id is None:
+            raise ValidationException("Withdrawal transaction is missing a wallet identifier.")
+        wallet = await self._load_wallet_for_update(transaction.wallet_id)
+        if wallet is None:
+            raise ValidationException("Wallet not found.")
+        if wallet.locked_balance < transaction.amount:
+            raise WalletException("Withdrawal reservation is insufficient for release.")
+        wallet.available_balance += transaction.amount
+        wallet.locked_balance -= transaction.amount
+        if wallet.available_balance < 0 or wallet.locked_balance < 0:
+            raise WalletException("Wallet balance cannot be negative.")
+        await self.wallet_repository.update_balance_fields(
+            wallet,
+            available_balance=wallet.available_balance,
+            locked_balance=wallet.locked_balance,
+        )
+        transaction.status = "failed"
+        metadata: dict[str, Any] = {"provider_outcome": reason}
+        if provider_error_type:
+            metadata["provider_error_type"] = provider_error_type
+        transaction.metadata_payload = self._merge_metadata(transaction.metadata_payload, metadata)
+        await self.transaction_repository.update_transaction(
+            transaction,
+            status="failed",
+            metadata_payload=transaction.metadata_payload,
+        )
+        return self._withdrawal_result(transaction)
+
+    def _withdrawal_result(self, transaction: Transaction) -> dict[str, Any]:
+        return {
+            "transaction_id": str(transaction.id),
+            "reference": transaction.reference,
+            "status": transaction.status,
+            "wallet_id": str(transaction.wallet_id) if transaction.wallet_id else None,
+            "amount": str(transaction.amount),
+            "currency": transaction.currency,
+            "provider_reference": transaction.provider_reference,
+            "provider_transaction_id": transaction.provider_transaction_id,
+        }
+
+    async def _load_user_wallet_for_update(self, user_id: UUID) -> Wallet | None:
+        session = self._resolve_session()
+        if session is None:
+            return await self.wallet_repository.get_user_wallet_for_update(user_id=user_id)
+        result = await session.execute(
+            select(Wallet).where(Wallet.user_id == user_id).with_for_update()
+        )
+        return result.scalar_one_or_none()
 
     async def validate_withdrawal(
         self,
@@ -266,6 +552,66 @@ class WalletWithdrawalService:
         except Exception as exc:
             raise DatabaseException("Withdrawal reversal failed.") from exc
 
+    async def release_withdrawal(
+        self,
+        *,
+        transaction_id: UUID | None = None,
+        reference: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Release a pending withdrawal reservation after a failed execution."""
+        self._require_repository(self.wallet_repository)
+        self._require_repository(self.transaction_repository)
+
+        try:
+            async with self._session_scope():
+                transaction = await self._get_transaction_for_update(
+                    transaction_id=transaction_id,
+                    reference=reference,
+                )
+                if transaction is None:
+                    raise ValidationException("Withdrawal transaction not found.")
+                if transaction.category != "withdrawal":
+                    raise ValidationException("Transaction is not a withdrawal.")
+                if transaction.status in {"failed", "reversed"}:
+                    return {"transaction_id": str(transaction.id), "status": transaction.status}
+                if transaction.status not in {"funds_reserved", "processing", "pending"}:
+                    raise WalletException("Only pending withdrawals can release funds.")
+                if transaction.wallet_id is None:
+                    raise ValidationException("Withdrawal transaction is missing a wallet identifier.")
+
+                wallet = await self._load_wallet_for_update(transaction.wallet_id)
+                if wallet is None:
+                    raise ValidationException("Wallet not found.")
+                wallet.available_balance += transaction.amount
+                wallet.locked_balance = max(Decimal("0.00"), wallet.locked_balance - transaction.amount)
+                await self.wallet_repository.update_balance_fields(
+                    wallet,
+                    available_balance=wallet.available_balance,
+                    locked_balance=wallet.locked_balance,
+                )
+                transaction.status = "failed"
+                transaction.metadata_payload = self._merge_metadata(
+                    transaction.metadata_payload,
+                    {"release_reason": reason} if reason else None,
+                )
+                await self.transaction_repository.update_transaction(
+                    transaction,
+                    status=transaction.status,
+                    metadata_payload=transaction.metadata_payload,
+                )
+                return {
+                    "transaction_id": str(transaction.id),
+                    "status": transaction.status,
+                    "wallet_id": str(wallet.id),
+                }
+        except ValidationException:
+            raise
+        except WalletException:
+            raise
+        except Exception as exc:
+            raise DatabaseException("Withdrawal reservation release failed.") from exc
+
     async def _get_transaction(self, *, transaction_id: UUID | None = None, reference: str | None = None) -> Transaction | None:
         if transaction_id is not None:
             return await self.transaction_repository.get_by_id(transaction_id)
@@ -273,10 +619,22 @@ class WalletWithdrawalService:
             return await self.transaction_repository.get_by_reference(reference)
         return None
 
+    async def _get_transaction_for_update(
+        self,
+        *,
+        transaction_id: UUID | None = None,
+        reference: str | None = None,
+    ) -> Transaction | None:
+        if transaction_id is not None:
+            return await self.transaction_repository.get_by_id_for_update(transaction_id)
+        if reference is not None:
+            return await self.transaction_repository.get_by_reference_for_update(reference)
+        return None
+
     async def _load_wallet_for_update(self, wallet_id: UUID) -> Wallet | None:
         session = self._resolve_session()
         if session is None:
-            return await self.wallet_repository.get_by_id(wallet_id)
+            return await self.wallet_repository.get_by_id_for_update(wallet_id)
         stmt = select(Wallet).where(Wallet.id == wallet_id).with_for_update()
         result = await session.execute(stmt)
         return result.scalar_one_or_none()

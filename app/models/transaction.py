@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
@@ -39,6 +39,12 @@ class Transaction(Base):
         index=True,
         doc="Wallet involved in the transaction.",
     )
+    bank_account_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("bank_accounts.id"),
+        nullable=True,
+        index=True,
+        doc="Trusted beneficiary bank account for withdrawal transactions.",
+    )
     transaction_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True, doc="Type of transaction.")
     category: Mapped[str] = mapped_column(String(100), nullable=False, index=True, doc="Transaction category for reporting.")
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0, doc="Transaction amount.")
@@ -49,6 +55,13 @@ class Transaction(Base):
     provider_name: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True, doc="Payment or service provider name.")
     provider_reference: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True, doc="Provider-specific reference.")
     provider_transaction_id: Mapped[str | None] = mapped_column(String(255), nullable=True, doc="Provider transaction identifier.")
+    card_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, doc="Gift-card face value for sell transactions.")
+    card_currency: Mapped[str | None] = mapped_column(String(10), nullable=True, doc="Gift-card face-value currency for sell transactions.")
+    payout_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, doc="Provider payout amount for sell transactions.")
+    payout_currency: Mapped[str | None] = mapped_column(String(10), nullable=True, doc="Provider payout currency for sell transactions.")
+    credited_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, doc="Wallet credit amount for sell transactions.")
+    credited_currency: Mapped[str | None] = mapped_column(String(10), nullable=True, doc="Wallet credit currency for sell transactions.")
+    credit_applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false", doc="Whether the wallet credit was applied.")
     external_reference: Mapped[str | None] = mapped_column(String(255), nullable=True, doc="External reference from a partner system.")
     description: Mapped[str | None] = mapped_column(Text, nullable=True, doc="Short transaction description.")
     metadata_payload: Mapped[str | None] = mapped_column(Text, nullable=True, doc="Optional non-sensitive transaction metadata.")

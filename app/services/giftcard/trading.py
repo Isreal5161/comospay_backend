@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Callable
@@ -10,6 +11,7 @@ from uuid import UUID, uuid4
 from app.models.provider import Provider
 from app.models.transaction import Transaction
 from app.models.wallet import Wallet
+from app.schemas.giftcard_schema import GiftCardSellSubmission
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
@@ -65,7 +67,6 @@ class GiftCardTradingService:
             currency=currency,
             transaction_pin=transaction_pin,
         )
-
         if provider_operation is None:
             raise ValidationException("A provider operation callback is required for gift card purchase transactions.")
 
@@ -106,6 +107,8 @@ class GiftCardTradingService:
                 currency=currency,
                 charges=Decimal("0"),
                 total_amount=amount_value,
+                card_amount=submission.card_amount if submission is not None else amount_value,
+                card_currency=submission.card_currency if submission is not None else currency,
                 status="pending",
                 provider_name=provider_name,
                 description=description or f"Gift card purchase for {brand} {card_type}",
@@ -143,6 +146,7 @@ class GiftCardTradingService:
         provider_name: str | None = None,
         provider_operation: Callable[[Provider], Awaitable[Any]] | None = None,
         metadata_payload: str | None = None,
+        submission: GiftCardSellSubmission | None = None,
         reference: str | None = None,
     ) -> dict[str, Any]:
         """Create a gift card sell transaction and dispatch it to a gift card provider."""
@@ -155,6 +159,13 @@ class GiftCardTradingService:
             currency=currency,
             transaction_pin=transaction_pin,
         )
+        if submission is not None:
+            if submission.brand_slug != brand:
+                raise ValidationException("Submission brand slug must match the gift card brand.")
+            if submission.card_type != card_type:
+                raise ValidationException("Submission card type must match the gift card card type.")
+            if submission.card_amount != float(amount_value):
+                raise ValidationException("Submission card amount must match the gift card amount.")
 
         if provider_operation is None:
             raise ValidationException("A provider operation callback is required for gift card sell transactions.")
@@ -213,6 +224,7 @@ class GiftCardTradingService:
             provider_operation=provider_operation,
             provider_name=provider_name,
             metadata_payload=metadata_payload,
+            submission=submission,
         )
 
     async def process_giftcard_trade(
@@ -223,6 +235,7 @@ class GiftCardTradingService:
         provider_operation: Callable[[Provider], Awaitable[Any]] | None = None,
         provider_name: str | None = None,
         metadata_payload: str | None = None,
+        submission: GiftCardSellSubmission | None = None,
     ) -> dict[str, Any]:
         """Dispatch a pending gift card trade to a provider and update the transaction."""
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
@@ -247,6 +260,7 @@ class GiftCardTradingService:
                     "transaction_type": resolved.transaction_type,
                     "description": resolved.description,
                     "metadata_payload": metadata_payload,
+                    "submission": submission,
                 },
             )
         except Exception as exc:
@@ -255,11 +269,23 @@ class GiftCardTradingService:
 
         status = self._normalize_status(provider_response.get("status"))
         async with self._transaction_scope():
-            transaction_record = await self.transaction_repository.get_by_reference(resolved.reference)
+            transaction_record = await self.transaction_repository.get_by_reference_for_update(resolved.reference)
             if transaction_record is None:
                 raise ValidationException("Gift card trade transaction was not found.")
 
+            if transaction_record.transaction_type == "giftcard_sell":
+                if getattr(transaction_record, "credit_applied", False):
+                    return await self._build_response(transaction_record)
+                if self._normalize_status(transaction_record.status) in {"failed", "cancelled", "reversed"} and status in {"succeeded", "completed", "settled"}:
+                    return await self._build_response(transaction_record)
+
             metadata = self._parse_metadata(transaction_record.metadata_payload)
+            payout_amount = self._coerce_optional_decimal(provider_response.get("payout_amount"))
+            payout_currency = self._coerce_string(provider_response.get("payout_currency")).upper() or None
+            if payout_amount is not None:
+                transaction_record.payout_amount = payout_amount
+            if payout_currency is not None:
+                transaction_record.payout_currency = payout_currency
             metadata["provider_response"] = provider_response
             metadata["attempted"] = True
             metadata["last_provider_status"] = provider_response.get("status")
@@ -277,6 +303,8 @@ class GiftCardTradingService:
                 provider_name=transaction_record.provider_name,
                 provider_reference=transaction_record.provider_reference,
                 provider_transaction_id=transaction_record.provider_transaction_id,
+                payout_amount=transaction_record.payout_amount,
+                payout_currency=transaction_record.payout_currency,
                 external_reference=transaction_record.external_reference,
                 metadata_payload=transaction_record.metadata_payload,
             )
@@ -362,10 +390,11 @@ class GiftCardTradingService:
             raise ValidationException("Wallet was not found.")
         return wallet
 
-    async def _get_wallet_for_transaction(self, transaction: Transaction) -> Wallet:
+    async def _get_wallet_for_transaction(self, transaction: Transaction, *, for_update: bool = False) -> Wallet:
         if transaction.wallet_id is None:
             raise ValidationException("Transaction wallet was not found.")
-        wallet = await self.wallet_repository.get_by_id(transaction.wallet_id)
+        getter = self.wallet_repository.get_by_id_for_update if for_update else self.wallet_repository.get_by_id
+        wallet = await getter(transaction.wallet_id)
         if wallet is None:
             raise ValidationException("Wallet was not found.")
         return wallet
@@ -422,8 +451,26 @@ class GiftCardTradingService:
 
     async def _handle_successful_trade(self, transaction: Transaction) -> None:
         if transaction.transaction_type == "giftcard_sell":
-            wallet = await self._get_wallet_for_transaction(transaction)
-            await self._credit_wallet(transaction=transaction, wallet=wallet, amount=transaction.amount)
+            if getattr(transaction, "credit_applied", False):
+                return
+            wallet = await self._get_wallet_for_transaction(transaction, for_update=True)
+            self._validate_sell_payout(transaction, wallet)
+            transaction.credited_amount = transaction.payout_amount
+            transaction.credited_currency = transaction.payout_currency
+            transaction.credit_applied = True
+            await self._credit_wallet(transaction=transaction, wallet=wallet, amount=transaction.payout_amount)
+            await self.transaction_repository.update_transaction(
+                transaction,
+                credited_amount=transaction.credited_amount,
+                credited_currency=transaction.credited_currency,
+                credit_applied=transaction.credit_applied,
+            )
+
+    def _validate_sell_payout(self, transaction: Transaction, wallet: Wallet) -> None:
+        if transaction.payout_amount is None or not transaction.payout_currency:
+            raise ValidationException("Gift card sell payout is missing.")
+        if transaction.payout_currency.upper() != wallet.currency.upper():
+            raise WalletException("Gift card payout currency does not match wallet currency.")
 
     async def _handle_provider_failure(self, *, transaction: Transaction, reason: str) -> None:
         self.logger.warning("giftcard_trade_failed", extra={"reference": transaction.reference, "reason": reason})
@@ -487,6 +534,12 @@ class GiftCardTradingService:
             "provider_name": transaction.provider_name,
             "provider_reference": transaction.provider_reference,
             "provider_transaction_id": transaction.provider_transaction_id,
+            "card_amount": str(transaction.card_amount) if transaction.card_amount is not None else None,
+            "card_currency": transaction.card_currency,
+            "payout_amount": str(transaction.payout_amount) if transaction.payout_amount is not None else None,
+            "payout_currency": transaction.payout_currency,
+            "credited_amount": str(transaction.credited_amount) if transaction.credited_amount is not None else None,
+            "credited_currency": transaction.credited_currency,
             "description": transaction.description,
             "created_at": transaction.created_at.isoformat() if transaction.created_at else None,
             "updated_at": transaction.updated_at.isoformat() if transaction.updated_at else None,
@@ -529,7 +582,33 @@ class GiftCardTradingService:
             "provider_reference": self._coerce_string(payload.get("provider_reference") or payload.get("reference")),
             "provider_transaction_id": self._coerce_string(payload.get("provider_transaction_id") or payload.get("transaction_id")),
             "message": self._coerce_string(payload.get("message") or payload.get("error")),
+            "payout_amount": payload.get("payout_amount"),
+            "payout_currency": self._coerce_string(payload.get("payout_currency") or self._extract_payout_currency(payload.get("payout_amount"))),
+            "card_amount": payload.get("card_amount"),
+            "card_currency": self._coerce_string(payload.get("card_currency")),
         }
+
+    def _coerce_string(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return str(value)
+
+    def _coerce_optional_decimal(self, value: Any) -> Decimal | None:
+        if isinstance(value, dict):
+            value = value.get("raw")
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
+
+    def _extract_payout_currency(self, value: Any) -> str:
+        if isinstance(value, dict):
+            return self._coerce_string(value.get("currency"))
+        return ""
 
     def _normalize_status(self, status: Any) -> str:
         if status is None:
@@ -555,8 +634,14 @@ class GiftCardTradingService:
         metadata["reconciliation_events"] = events
         metadata["reconciliation_required"] = True
 
-    def _transaction_scope(self):
-        return self.transaction_repository.session.begin()
+    @asynccontextmanager
+    async def _transaction_scope(self):
+        session = self.transaction_repository.session
+        if session.in_transaction():
+            yield
+            return
+        async with session.begin():
+            yield
 
 
 __all__ = ["GiftCardTradingService"]

@@ -1,12 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
-
 from app.config.settings import settings
-
-
-class FlutterwaveAuthenticationError(Exception):
-    """Raised when Flutterwave authentication configuration is invalid."""
+from app.integrations.payments.flutterwave.exceptions import FlutterwaveAuthenticationError
 
 
 class FlutterwaveAuthentication:
@@ -31,6 +26,8 @@ class FlutterwaveAuthentication:
 
     def get_auth_header(self) -> str:
         """Return the authorization header value."""
+        if not self._secret_key:
+            raise FlutterwaveAuthenticationError("Flutterwave secret key is not configured.")
         return f"Bearer {self._secret_key}"
 
     def _resolve_secret_key(self, secret_key: str | None) -> str:

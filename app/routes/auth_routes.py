@@ -59,7 +59,7 @@ async def get_auth_service(session: AsyncSession = Depends(get_db)) -> AuthServi
     # Compose a minimal request-scoped wallet facade from concrete internal services
     transaction_repository = TransactionRepository(session=session)
     from app.repositories.virtual_account_repository import VirtualAccountRepository
-    from app.routes.notification_routes import build_notification_service
+    from app.services.notification_service import build_notification_service
     from app.services.virtual_account_service import VirtualAccountService
     from app.integrations.payments.flutterwave.client import FlutterwaveClient
     from app.integrations.payments.flutterwave.virtual_accounts import FlutterwaveVirtualAccountService
@@ -115,6 +115,7 @@ async def get_auth_service(session: AsyncSession = Depends(get_db)) -> AuthServi
         session_service=session_service,
         device_service=device_service,
         wallet_service=wallet_service,
+        notification_service=build_notification_service(session=session, redis_client=None),
     )
 
 

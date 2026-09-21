@@ -75,7 +75,10 @@ async def get_webhook_service(session: AsyncSession = Depends(get_db)) -> Webhoo
     )
     education_webhook_service = EducationWebhookService(education_service=education_service)
     giftcard_service = _build_giftcard_service(session=session, provider_service=provider_service)
-    giftcard_webhook_service = GiftCardWebhookService(giftcard_service=giftcard_service)
+    giftcard_webhook_service = GiftCardWebhookService(
+        giftcard_service=giftcard_service,
+        provider_repository=ProviderRepository(session=session),
+    )
     notification_webhook_service = NotificationWebhookService(notification_service=notification_service)
     cloud_service = CloudWebhookService(provider_service=provider_service)
     security_service = WebhookSecurityService()
@@ -265,3 +268,19 @@ async def handle_notification_webhook(
     controller: WebhookController = Depends(get_webhook_controller),
 ) -> dict[str, Any]:
     return await controller.handle_notification_webhook(request)
+
+
+@router.post("/giftcard", status_code=status.HTTP_200_OK)
+async def handle_giftcard_webhook(
+    request: Request,
+    controller: WebhookController = Depends(get_webhook_controller),
+) -> dict[str, Any]:
+    return await controller.handle_giftcard_webhook(request)
+
+
+@router.post("/giftcard/sogo", status_code=status.HTTP_200_OK)
+async def handle_sogo_giftcard_webhook(
+    request: Request,
+    controller: WebhookController = Depends(get_webhook_controller),
+) -> dict[str, Any]:
+    return await controller.handle_sogo_giftcard_webhook(request)

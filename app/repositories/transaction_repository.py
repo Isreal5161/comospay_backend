@@ -75,6 +75,16 @@ class TransactionRepository:
         result = await self.session.execute(select(Transaction).where(Transaction.reference == reference).with_for_update())
         return result.scalar_one_or_none()
 
+    async def get_by_provider_reference(self, *, provider_name: str | None, provider_reference: str | None) -> Transaction | None:
+        """Retrieve a transaction by the provider-scoped reference used in webhook callbacks."""
+        if not provider_reference or not isinstance(provider_reference, str):
+            return None
+        query = select(Transaction).where(Transaction.provider_reference == provider_reference)
+        if provider_name is not None:
+            query = query.where(Transaction.provider_name == provider_name)
+        result = await self.session.execute(query)
+        return result.scalar_one_or_none()
+
     async def get_user_transactions(
         self,
         *,

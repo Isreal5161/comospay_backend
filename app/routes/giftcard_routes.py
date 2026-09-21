@@ -45,8 +45,30 @@ from app.services.wallet import (
 )
 from app.routes.notification_routes import build_notification_service
 from app.services.wallet_service import WalletService
+from app.integrations.giftcards.sogo import SogoGiftCardProvider
+from app.models.provider import Provider
 
 router = APIRouter(prefix="/giftcards", tags=["Gift Cards"])
+
+
+def build_provider_integration(provider: Provider) -> Any:
+    """Instantiate the gift card provider integration for the resolved provider.
+
+    This factory function maps each provider to its corresponding gift card adapter.
+    Currently supports: Sogo (Phase 3B integration).
+    """
+    provider_code = (provider.code or provider.name or "").strip().lower()
+
+    if provider_code == "sogo":
+        return SogoGiftCardProvider()
+
+    # Future providers would be added here:
+    # if provider_code == "cardtonic":
+    #     return CardtonicGiftCardProvider()
+    # if provider_code == "prestmit":
+    #     return PrestmitGiftCardProvider()
+
+    raise ValueError(f"Unsupported gift card provider: {provider_code}")
 
 
 async def get_giftcard_service(session: AsyncSession = Depends(get_db)) -> GiftCardService:
@@ -151,6 +173,7 @@ async def get_giftcard_service(session: AsyncSession = Depends(get_db)) -> GiftC
         pricing_service=pricing_service,
         settlement_service=settlement_service,
         reconciliation_service=reconciliation_service,
+        provider_integration_builder=build_provider_integration,
     )
 
 

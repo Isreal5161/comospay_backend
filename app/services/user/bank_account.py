@@ -3,13 +3,14 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.bank_account import BankAccount
 from app.repositories.bank_account_repository import BankAccountRepository
 from app.repositories.user_repository import UserRepository
+from app.services.security.bank_account_encryption import BankAccountEncryption
 from app.utils.exceptions import DatabaseException, ProviderException, ValidationException
 
 
@@ -28,8 +29,8 @@ class ProviderBankAccountAdapter:
             "verified": True,
             "account_name": account_name or "Verified Account",
             "bank_name": "Local Bank",
-            "provider_reference": f"local:{normalized_bank_code}:{normalized_account}",
-            "provider_customer_reference": f"cust:{normalized_account}",
+            "provider_reference": f"local:{uuid4()}",
+            "provider_customer_reference": f"cust:{uuid4()}",
         }
 
 
@@ -46,6 +47,7 @@ class BankAccountService:
         audit_service: Any | None = None,
         session: AsyncSession | None = None,
         logger: logging.Logger | None = None,
+        encryption: BankAccountEncryption | None = None,
     ) -> None:
         self.user_repository = user_repository
         self.bank_account_repository = bank_account_repository
@@ -54,6 +56,7 @@ class BankAccountService:
         self.audit_service = audit_service
         self.session = session
         self.logger = logger or logging.getLogger(__name__)
+        self.encryption = encryption or BankAccountEncryption()
 
     async def add_bank_account(
         self,
@@ -82,7 +85,7 @@ class BankAccountService:
 
         existing_accounts, _ = await self.bank_account_repository.get_user_accounts(user_id=user_id, page=1, page_size=100)
         for account in existing_accounts:
-            if account.is_active and account.account_number == account_number and account.bank_code == bank_code:
+            if account.is_active and account.account_number_fingerprint == self.encryption.fingerprint(account_number) and account.bank_code == bank_code:
                 raise ValidationException("A similar active bank account already exists.")
 
         verification_result = await self._verify_with_provider(
@@ -98,7 +101,10 @@ class BankAccountService:
                 bank_account = BankAccount(
                     user_id=user.id,
                     account_name=verification_result.get("account_name") or account_name,
-                    account_number=account_number,
+                    account_number_encrypted=self.encryption.encrypt(account_number),
+                    account_number_fingerprint=self.encryption.fingerprint(account_number),
+                    account_number_prefix=account_number[:2],
+                    account_number_last4=account_number[-4:],
                     bank_name=verification_result.get("bank_name") or bank_name,
                     bank_code=bank_code,
                     account_type=account_type,
@@ -164,6 +170,37 @@ class BankAccountService:
         if not account or account.user_id != user_id:
             raise ValidationException("Bank account not found.")
         return self._serialize_bank_account(account)
+
+    async def resolve_withdrawal_account(self, *, user_id: UUID, bank_account_id: UUID) -> dict[str, Any]:
+        """Resolve an authenticated user's verified account for withdrawal use."""
+        self._require_repository(self.user_repository)
+        self._require_repository(self.bank_account_repository)
+        account = await self.bank_account_repository.get_by_id_for_user_for_update(
+            bank_account_id=bank_account_id,
+            user_id=user_id,
+        )
+        if account is None:
+            raise ValidationException("Bank account not found.")
+        if not account.is_active or account.status.lower() != "verified" or account.verified_at is None:
+            raise ValidationException("Bank account is not verified for withdrawal.")
+        encrypted = getattr(account, "account_number_encrypted", None)
+        legacy_number = getattr(account, "account_number", None)
+        if not encrypted and legacy_number and not hasattr(account, "account_number_encrypted"):
+            account_number = legacy_number
+        elif encrypted:
+            account_number = self.encryption.decrypt(encrypted)
+        else:
+            raise ValidationException("Bank account details are incomplete.")
+        if not account.bank_code:
+            raise ValidationException("Bank account details are incomplete.")
+        return {
+            "id": account.id,
+            "user_id": account.user_id,
+            "account_number": account_number,
+            "bank_code": account.bank_code,
+            "account_name": account.account_name,
+            "bank_name": account.bank_name,
+        }
 
     async def set_default_bank_account(self, *, user_id: UUID, bank_account_id: UUID) -> dict[str, Any]:
         """Ensure a single default bank account exists for the user."""
@@ -287,7 +324,7 @@ class BankAccountService:
         return {
             "id": str(bank_account.id),
             "account_name": bank_account.account_name,
-            "account_number": self._mask_account_number(bank_account.account_number),
+            "account_number": self._mask_account_number(bank_account),
             "bank_name": bank_account.bank_name,
             "bank_code": bank_account.bank_code,
             "account_type": bank_account.account_type,
@@ -299,12 +336,19 @@ class BankAccountService:
             "created_at": bank_account.created_at.isoformat() if bank_account.created_at else None,
         }
 
-    def _mask_account_number(self, account_number: str | None) -> str | None:
-        if not account_number:
+    def _mask_account_number(self, bank_account: BankAccount | Any) -> str | None:
+        prefix = getattr(bank_account, "account_number_prefix", None)
+        last4 = getattr(bank_account, "account_number_last4", None)
+        legacy_number = getattr(bank_account, "account_number", None)
+        if not prefix and legacy_number:
+            prefix = legacy_number[:2]
+        if not last4 and legacy_number:
+            last4 = legacy_number[-4:]
+        if not last4:
             return None
-        if len(account_number) <= 4:
-            return "*" * len(account_number)
-        return f"{account_number[:2]}{'*' * (len(account_number) - 4)}{account_number[-2:]}"
+        if prefix and len(last4) == 4:
+            return f"{prefix}{'*' * 6}{last4[-2:]}"
+        return f"{'*' * 6}{last4}"
 
     async def _ensure_single_default(self, *, user_id: UUID, bank_account_id: UUID) -> None:
         existing_accounts, _ = await self.bank_account_repository.get_user_accounts(user_id=user_id, page=1, page_size=100)

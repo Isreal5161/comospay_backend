@@ -20,18 +20,27 @@ from app.controllers.wallet_controller import (
     WalletInfoRequest,
     WalletStatementRequest,
     WalletTransferRequest,
+    WalletWithdrawalRequest,
 )
 from app.repositories.transaction_repository import TransactionRepository
+from app.repositories.bank_account_repository import BankAccountRepository
+from app.repositories.provider_repository import ProviderRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.user.bank_account import BankAccountService
 from app.services.wallet import (
     WalletFundingService,
     WalletManager,
     WalletPinService,
     WalletStatementService,
     WalletTransferService,
+    WalletWithdrawalService,
 )
 from app.services.wallet_service import WalletService
+from app.services.provider.failover import ProviderFailoverService
+from app.services.provider.health import ProviderHealthService
+from app.services.provider.selector import ProviderSelector
+from app.services.provider_service import ProviderService
 
 
 router = APIRouter(prefix="/wallets", tags=["Wallets"])
@@ -63,6 +72,34 @@ async def get_wallet_service(session: AsyncSession = Depends(get_db)) -> WalletS
     user_repository = UserRepository(session=session)
     wallet_repository = WalletRepository(session=session)
     transaction_repository = TransactionRepository(session=session)
+    provider_repository = ProviderRepository(session=session)
+    provider_selector = ProviderSelector(provider_repository=provider_repository)
+    provider_health_service = ProviderHealthService(provider_repository=provider_repository)
+    provider_failover_service = ProviderFailoverService(
+        selector=provider_selector,
+        health_service=provider_health_service,
+    )
+    provider_service = ProviderService(
+        selector=provider_selector,
+        health_service=provider_health_service,
+        failover_service=provider_failover_service,
+        provider_repository=provider_repository,
+    )
+
+    from app.integrations.payments.flutterwave.withdrawal import build_flutterwave_withdrawal_provider
+
+    flutterwave_withdrawal = build_flutterwave_withdrawal_provider()
+
+    def withdrawal_provider_factory(provider: Any) -> Any:
+        provider_code = (getattr(provider, "code", None) or getattr(provider, "name", None) or "").strip().lower()
+        if provider_code == "flutterwave":
+            return flutterwave_withdrawal
+        raise ValueError(f"Unsupported withdrawal provider: {provider_code}")
+    bank_account_service = BankAccountService(
+        user_repository=user_repository,
+        bank_account_repository=BankAccountRepository(session=session),
+        session=session,
+    )
 
     wallet_manager = WalletManager(
         user_repository=user_repository,
@@ -82,6 +119,14 @@ async def get_wallet_service(session: AsyncSession = Depends(get_db)) -> WalletS
         transaction_repository=transaction_repository,
         session=session,
     )
+    withdrawal_service = WalletWithdrawalService(
+        wallet_repository=wallet_repository,
+        transaction_repository=transaction_repository,
+        bank_account_service=bank_account_service,
+        provider_service=provider_service,
+        provider_adapter_factory=withdrawal_provider_factory,
+        session=session,
+    )
     pin_service = WalletPinService(
         user_repository=user_repository,
         wallet_repository=wallet_repository,
@@ -99,6 +144,7 @@ async def get_wallet_service(session: AsyncSession = Depends(get_db)) -> WalletS
         transfer_service=transfer_service,
         pin_service=pin_service,
         statement_service=statement_service,
+        withdrawal_service=withdrawal_service,
     )
 
 
@@ -150,6 +196,15 @@ async def transfer(
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
     return await controller.transfer(payload, request=request)
+
+
+@router.post("/withdraw", status_code=status.HTTP_201_CREATED)
+async def withdraw(
+    request: Request,
+    payload: WalletWithdrawalRequest,
+    controller: WalletController = Depends(get_wallet_controller),
+) -> dict[str, Any]:
+    return await controller.withdraw(payload, request=request)
 
 
 @router.post("/pin", status_code=status.HTTP_201_CREATED)

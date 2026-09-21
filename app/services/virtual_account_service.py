@@ -68,6 +68,18 @@ class VirtualAccountService:
                     extra={"error": str(exc)},
                 )
 
+    @staticmethod
+    def _mask_account_number(account_number: str | None) -> str | None:
+        """Mask virtual account numbers before logging or emitting user-facing messages."""
+        if account_number is None:
+            return None
+        value = str(account_number).strip()
+        if not value:
+            return value
+        if len(value) <= 4:
+            return "*" * len(value)
+        return f"{'*' * 6}{value[-4:]}"
+
     async def create_virtual_account(
         self,
         *,
@@ -122,7 +134,7 @@ class VirtualAccountService:
                     "wallet_id": str(wallet_id),
                     "user_id": str(user_id),
                     "provider": provider,
-                    "account_number": account_number,
+                    "account_number": self._mask_account_number(account_number),
                     "is_primary": should_be_primary,
                 },
             )
@@ -209,7 +221,7 @@ class VirtualAccountService:
                     "wallet_id": str(wallet_id),
                     "user_id": str(user_id),
                     "provider": provider_name,
-                    "account_number": created.account_number,
+                    "account_number": self._mask_account_number(created.account_number),
                 },
             )
             await self._emit_audit("provider_virtual_account_created", wallet_id=wallet_id, provider=provider_name)
@@ -934,7 +946,7 @@ class VirtualAccountService:
             return
 
         try:
-            identifier = virtual_account.account_number or virtual_account.provider_reference or str(virtual_account.id)
+            identifier = self._mask_account_number(virtual_account.account_number) or virtual_account.provider_reference or str(virtual_account.id)
             await self.notification_service.create_notification(
                 user_id=virtual_account.user_id,
                 title="Virtual account activated",
@@ -946,7 +958,7 @@ class VirtualAccountService:
                 reference=str(virtual_account.id),
                 metadata={
                     "provider": virtual_account.provider,
-                    "account_number": virtual_account.account_number,
+                    "account_number": self._mask_account_number(virtual_account.account_number),
                     "wallet_id": str(virtual_account.wallet_id),
                 },
             )

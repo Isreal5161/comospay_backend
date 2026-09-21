@@ -28,7 +28,10 @@ class BankAccount(Base):
         doc="Owning user identifier.",
     )
     account_name: Mapped[str | None] = mapped_column(String(255), nullable=True, doc="Account holder name.")
-    account_number: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True, doc="Bank account number.")
+    account_number_encrypted: Mapped[str | None] = mapped_column(String(255), nullable=True, doc="Encrypted bank account number.")
+    account_number_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, doc="Keyed bank account lookup fingerprint.")
+    account_number_prefix: Mapped[str | None] = mapped_column(String(2), nullable=True, doc="Non-sensitive masking prefix.")
+    account_number_last4: Mapped[str | None] = mapped_column(String(4), nullable=True, doc="Last four account-number digits.")
     bank_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True, doc="Bank name.")
     bank_code: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True, doc="Bank code.")
     account_type: Mapped[str | None] = mapped_column(String(50), nullable=True, doc="Account type such as savings or current.")

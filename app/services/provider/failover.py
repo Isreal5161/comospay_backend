@@ -61,7 +61,11 @@ class ProviderFailoverService:
         if not providers:
             raise ValidationException("No eligible providers are available for the requested category.")
 
-        retryable = retryable_errors or (TimeoutError, asyncio.TimeoutError, ConnectionError, OSError)
+        retryable = (
+            retryable_errors
+            if retryable_errors is not None
+            else (TimeoutError, asyncio.TimeoutError, ConnectionError, OSError)
+        )
         last_error: BaseException | None = None
 
         for attempt in range(self.max_retries + 1):

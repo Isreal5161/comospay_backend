@@ -80,6 +80,7 @@ class TransferRequest(BaseModel):
     reference: str | None = Field(default=None, description="Client transfer reference.")
     currency: str = Field(default="NGN", description="Transfer currency.")
     debit_currency: str | None = Field(default=None, description="Currency to debit.")
+    beneficiary_name: str | None = Field(default=None, description="Beneficiary account name.")
 
 
 class TransferResponse(FlutterwaveResponse):

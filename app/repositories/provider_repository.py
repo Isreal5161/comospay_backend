@@ -43,8 +43,6 @@ class ProviderRepository:
         query = select(Provider).where(Provider.is_active.is_(True))
         if category:
             query = query.where(Provider.category == category)
-        if service_type:
-            query = query.where(Provider.category == service_type)
         result = await self.session.execute(query)
         return list(result.scalars().all())
 

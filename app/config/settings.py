@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     smtp_username: str | None = Field(default=None, alias="SMTP_USERNAME")
     smtp_password: SecretStr | None = Field(default=None, alias="SMTP_PASSWORD")
     smtp_from_email: str | None = Field(default=None, alias="SMTP_FROM_EMAIL")
+    smtp_timeout_seconds: float = Field(default=10.0, alias="SMTP_TIMEOUT_SECONDS")
+    frontend_url: str = Field(default="http://localhost:3000", alias="FRONTEND_URL")
 
     # Cloudinary
     cloudinary_cloud_name: str | None = Field(default=None, alias="CLOUDINARY_CLOUD_NAME")
@@ -88,6 +90,12 @@ class Settings(BaseSettings):
     monnify_api_key: str | None = Field(default=None, alias="MONNIFY_API_KEY")
     monnify_secret_key: SecretStr | None = Field(default=None, alias="MONNIFY_SECRET_KEY")
     korapay_secret_key: SecretStr | None = Field(default=None, alias="KORAPAY_SECRET_KEY")
+
+    # Sogo Gift Card provider
+    sogo_api_base_url: str | None = Field(default=None, alias="SOGO_API_BASE_URL")
+    sogo_api_key: SecretStr | None = Field(default=None, alias="SOGO_API_KEY")
+    sogo_webhook_secret: SecretStr | None = Field(default=None, alias="SOGO_WEBHOOK_SECRET")
+    sogo_timeout_seconds: float = Field(default=10.0, alias="SOGO_TIMEOUT_SECONDS")
 
     # VTU Providers
     aidapay_api_key: SecretStr | None = Field(default=None, alias="AIDAPAY_API_KEY")
@@ -121,6 +129,8 @@ class Settings(BaseSettings):
     max_login_attempts: int = Field(default=5, alias="MAX_LOGIN_ATTEMPTS")
     account_lock_duration_minutes: int = Field(default=15, alias="ACCOUNT_LOCK_DURATION_MINUTES")
     pin_length: int = Field(default=4, alias="PIN_LENGTH")
+    bank_account_encryption_key: SecretStr | None = Field(default=None, alias="BANK_ACCOUNT_ENCRYPTION_KEY")
+    bank_account_encryption_key_version: int = Field(default=1, alias="BANK_ACCOUNT_ENCRYPTION_KEY_VERSION")
 
     # Admin configuration
     admin_allowed_roles: list[str] | None = Field(default=None, alias="ADMIN_ALLOWED_ROLES")
@@ -251,6 +261,7 @@ class Settings(BaseSettings):
                 ("database_url", "DATABASE_URL"),
                 ("jwt_secret_key", "JWT_SECRET_KEY"),
                 ("redis_url", "REDIS_URL"),
+                ("bank_account_encryption_key", "BANK_ACCOUNT_ENCRYPTION_KEY"),
             ]
             missing = [name for field_name, name in required_fields if not has_value(getattr(self, field_name))]
             if missing:

@@ -5,6 +5,8 @@ import time
 from typing import Any, Mapping
 from uuid import uuid4
 
+from pydantic import ValidationError as PydanticValidationError
+
 from app.integrations.payments.flutterwave.authentication import FlutterwaveAuthentication
 from app.integrations.payments.flutterwave.client import FlutterwaveAPIError, FlutterwaveClient, FlutterwaveRequestError
 from app.integrations.payments.flutterwave.exceptions import (
@@ -45,6 +47,7 @@ class FlutterwaveTransferService:
         account_number: str,
         amount: float | int,
         narration: str | None = None,
+        account_name: str | None = None,
         reference: str | None = None,
         currency: str = "NGN",
         request_id: str | None = None,
@@ -56,13 +59,14 @@ class FlutterwaveTransferService:
         normalized_currency = self._validate_currency(currency)
         resolved_request_id = request_id or f"transfer-create-{uuid4().hex}"
         started_at = time.perf_counter()
-        headers = self._build_headers(resolved_request_id)
+        headers = self._build_headers(resolved_request_id, reference=reference)
 
         request_payload = TransferRequest(
             account_bank=account_bank.strip(),
             account_number=account_number.strip(),
             amount=float(amount),
             narration=narration,
+            beneficiary_name=account_name,
             reference=reference,
             currency=normalized_currency,
         )
@@ -77,8 +81,13 @@ class FlutterwaveTransferService:
         except Exception as exc:  # pragma: no cover - defensive mapping
             raise self._map_exception(exc, resolved_request_id, "/transfers") from exc
 
+        try:
+            response = TransferResponse.model_validate(payload or {})
+        except PydanticValidationError as exc:
+            raise FlutterwaveIntegrationAPIError("Flutterwave transfer response is malformed.") from exc
+
         self._log_completion("create_transfer", resolved_request_id, started_at, 200)
-        return TransferResponse.model_validate(payload or {})
+        return response
 
     async def get_transfer_details(
         self,
@@ -203,11 +212,11 @@ class FlutterwaveTransferService:
         self._log_completion("get_transfer_fee", resolved_request_id, started_at, 200)
         return TransferResponse.model_validate(payload or {})
 
-    def _build_headers(self, request_id: str) -> dict[str, str]:
+    def _build_headers(self, request_id: str, *, reference: str | None = None) -> dict[str, str]:
         """Build headers for transfer requests without exposing sensitive values."""
         headers = self.authentication.get_headers()
         headers["X-Request-ID"] = request_id
-        headers["Idempotency-Key"] = build_idempotency_key(request_id)
+        headers["Idempotency-Key"] = build_idempotency_key("transfer", reference or request_id)
         return headers
 
     def _validate_account_bank(self, account_bank: str | None) -> None:

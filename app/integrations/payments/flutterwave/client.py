@@ -207,9 +207,7 @@ class FlutterwaveClient:
         )
 
         if response.status_code >= 400:
-            raise FlutterwaveAPIError(
-                f"Flutterwave API error {response.status_code}: {response.text}"
-            )
+            raise FlutterwaveAPIError(f"Flutterwave API error {response.status_code}")
 
         if not response.content:
             return {}

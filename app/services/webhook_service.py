@@ -73,10 +73,21 @@ class WebhookService:
             raise ValidationException("Education webhook processing dependency is required.")
         return await self.education_service.process_purchase_update(payload=payload)
 
-    async def process_giftcard_webhook(self, *, payload: dict[str, Any]) -> dict[str, Any]:
+    async def process_giftcard_webhook(
+        self,
+        *,
+        provider_name: str,
+        event_id: str | None,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
         if self.giftcard_service is None:
             raise ValidationException("Gift-card webhook processing dependency is required.")
-        return await self.giftcard_service.process_status_update(payload=payload)
+        accepted = await self.check_idempotency(event_id=event_id, provider_name=provider_name)
+        if not accepted:
+            return {"status": "duplicate", "provider_name": provider_name}
+        result = await self.giftcard_service.process_webhook(provider_name=provider_name, payload=payload)
+        await self.idempotency_service.release_lock(event_id=event_id, provider_name=provider_name)
+        return result
 
     async def process_notification_webhook(self, *, payload: dict[str, Any]) -> dict[str, Any]:
         if self.notification_service is None:

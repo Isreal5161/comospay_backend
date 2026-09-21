@@ -64,6 +64,16 @@ class WalletTransferRequest(BaseModel):
     metadata_payload: str | None = Field(default=None, description="Optional metadata payload.")
 
 
+class WalletWithdrawalRequest(BaseModel):
+    """Request schema for provider-independent withdrawal reservations."""
+
+    amount: Decimal = Field(..., gt=0, description="Withdrawal amount.")
+    bank_account_id: UUID = Field(..., description="Trusted beneficiary bank-account identifier.")
+    currency: str = Field(default="NGN", min_length=3, max_length=10, description="Withdrawal currency.")
+    description: str | None = Field(default=None, max_length=255, description="Optional withdrawal description.")
+    metadata_payload: str | None = Field(default=None, max_length=1000, description="Optional metadata payload.")
+
+
 class TransactionPinRequest(BaseModel):
     """Request schema for transfer PIN creation and update."""
 
@@ -120,6 +130,7 @@ class WalletController:
         self.router.get("/statement", status_code=status.HTTP_200_OK)(self.get_wallet_statement)
         self.router.post("/fund", status_code=status.HTTP_200_OK)(self.fund_wallet)
         self.router.post("/transfer", status_code=status.HTTP_200_OK)(self.transfer)
+        self.router.post("/withdraw", status_code=status.HTTP_201_CREATED)(self.withdraw)
         self.router.post("/pin", status_code=status.HTTP_201_CREATED)(self.create_transaction_pin)
         self.router.put("/pin", status_code=status.HTTP_200_OK)(self.update_transaction_pin)
         self.router.post("/pin/verify", status_code=status.HTTP_200_OK)(self.verify_transaction_pin)
@@ -235,6 +246,26 @@ class WalletController:
                 "metadata_payload": payload.metadata_payload,
             },
             success_message="Wallet transfer completed successfully.",
+        )
+
+    async def withdraw(self, payload: WalletWithdrawalRequest, request: Request | None = None) -> dict[str, Any]:
+        """Reserve funds for a future bank withdrawal execution."""
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+
+        return await self._execute(
+            action="withdraw",
+            handler=self.wallet_service.create_withdrawal,
+            payload={
+                "user_id": authenticated_user_id,
+                "amount": payload.amount,
+                "bank_account_id": payload.bank_account_id,
+                "currency": payload.currency,
+                "description": payload.description,
+                "metadata_payload": payload.metadata_payload,
+            },
+            success_message="Withdrawal request created successfully.",
         )
 
     async def create_transaction_pin(self, payload: TransactionPinRequest, request: Request | None = None) -> dict[str, Any]:

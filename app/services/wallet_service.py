@@ -11,6 +11,7 @@ from app.services.wallet import (
     WalletPinService,
     WalletStatementService,
     WalletTransferService,
+    WalletWithdrawalService,
 )
 
 
@@ -25,6 +26,7 @@ class WalletService:
         transfer_service: WalletTransferService,
         pin_service: WalletPinService,
         statement_service: WalletStatementService,
+        withdrawal_service: WalletWithdrawalService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.wallet_manager = wallet_manager
@@ -32,6 +34,7 @@ class WalletService:
         self.transfer_service = transfer_service
         self.pin_service = pin_service
         self.statement_service = statement_service
+        self.withdrawal_service = withdrawal_service
         self.logger = logger or logging.getLogger(__name__)
 
     async def create_wallet(
@@ -234,6 +237,33 @@ class WalletService:
             account_number=account_number,
             account_name=account_name,
             transaction_pin=transaction_pin,
+            description=description,
+            metadata_payload=metadata_payload,
+        )
+
+    async def create_withdrawal(
+        self,
+        *,
+        user_id: UUID,
+        amount: Decimal | float | int,
+        currency: str,
+        bank_code: str,
+        account_number: str,
+        account_name: str | None = None,
+        description: str | None = None,
+        metadata_payload: str | None = None,
+    ) -> dict[str, Any]:
+        """Delegate provider-independent withdrawal reservation."""
+        if self.withdrawal_service is None:
+            raise RuntimeError("Withdrawal service is not configured.")
+        self._log_entry("create_withdrawal", user_id=user_id)
+        return await self.withdrawal_service.create_withdrawal(
+            user_id=user_id,
+            amount=amount,
+            currency=currency,
+            bank_code=bank_code,
+            account_number=account_number,
+            account_name=account_name,
             description=description,
             metadata_payload=metadata_payload,
         )
