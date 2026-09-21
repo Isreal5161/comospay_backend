@@ -320,117 +320,126 @@ class AuthService:
 
         try:
             async with self.session.begin():
-                user.failed_login_attempts = 0
-                user.account_locked_until = None
-                user.last_login_at = datetime.now(timezone.utc)
-                if user.status == "pending":
-                    user.status = "active"
-                await self.user_repository.update_user(
-                    user,
-                    failed_login_attempts=user.failed_login_attempts,
-                    account_locked_until=user.account_locked_until,
-                    last_login_at=user.last_login_at,
-                    status=user.status,
-                )
+                locked_user = await self._get_user_for_update(user.id)
+                if locked_user is None or not locked_user.password_hash:
+                    raise AuthenticationException("Invalid credentials.")
+                if locked_user.account_locked_until and locked_user.account_locked_until > datetime.now(timezone.utc):
+                    raise AuthenticationException("Account is temporarily locked.")
 
-                device_id: str | None = None
-                session_id: str | None = None
-                session_payload: dict[str, Any] | None = None
-                if device_fingerprint:
-                    if self.device_service is not None:
-                        try:
-                            device_payload = await self.device_service.register_device(
-                                user_id=str(user.id),
-                                device_fingerprint=device_fingerprint,
-                                device_name=device_name,
-                                device_type=device_type,
-                                ip_address=ip_address,
-                                user_agent=user_agent,
-                                is_trusted=True,
-                            )
-                            device_id = str(device_payload.get("device_id") or "") or None
-                        except Exception as exc:
-                            self.logger.warning("device_registration_failed", extra={"user_id": str(user.id), "error": str(exc)})
-                    else:
-                        device = await self._register_or_update_device(
-                            user_id=user.id,
+                locked_user.failed_login_attempts = 0
+                locked_user.account_locked_until = None
+                locked_user.last_login_at = datetime.now(timezone.utc)
+                if locked_user.status in {"pending", "locked"}:
+                    locked_user.status = "active"
+                await self.user_repository.update_user(
+                    locked_user,
+                    failed_login_attempts=locked_user.failed_login_attempts,
+                    account_locked_until=locked_user.account_locked_until,
+                    last_login_at=locked_user.last_login_at,
+                    status=locked_user.status,
+                )
+                user = locked_user
+
+            device_id: str | None = None
+            session_id: str | None = None
+            session_payload: dict[str, Any] | None = None
+            refresh_token_family_id = None
+            access_token = ""
+            refresh_token = ""
+
+            if device_fingerprint:
+                if self.device_service is not None:
+                    try:
+                        device_payload = await self.device_service.register_device(
+                            user_id=str(user.id),
                             device_fingerprint=device_fingerprint,
-                            ip_address=ip_address,
                             device_name=device_name,
                             device_type=device_type,
+                            ip_address=ip_address,
+                            user_agent=user_agent,
                             is_trusted=True,
                         )
-                        device_id = str(device.id) if getattr(device, "id", None) is not None else None
+                        device_id = str(device_payload.get("device_id") or "") or None
+                    except Exception as exc:
+                        self.logger.warning("device_registration_failed", extra={"user_id": str(user.id), "error": str(exc)})
+                else:
+                    device = await self._register_or_update_device(
+                        user_id=user.id,
+                        device_fingerprint=device_fingerprint,
+                        ip_address=ip_address,
+                        device_name=device_name,
+                        device_type=device_type,
+                        is_trusted=True,
+                    )
+                    device_id = str(device.id) if getattr(device, "id", None) is not None else None
 
-                refresh_token_family_id = None
-                if self.token_service is not None and hasattr(self.token_service, "generate_token_family_id"):
-                    refresh_token_family_id = self.token_service.generate_token_family_id()
+            if self.token_service is not None and hasattr(self.token_service, "generate_token_family_id"):
+                refresh_token_family_id = self.token_service.generate_token_family_id()
 
-                if self.session_service is not None:
-                    session_payload = await self.session_service.create_session(
-                        user_id=str(user.id),
+            if self.session_service is not None:
+                session_payload = await self.session_service.create_session(
+                    user_id=str(user.id),
+                    metadata={
+                        "ip_address": ip_address,
+                        "user_agent": user_agent,
+                        "device_fingerprint": device_fingerprint,
+                        "login_method": "password",
+                    },
+                    refresh_token_family_id=refresh_token_family_id,
+                )
+                if session_payload is not None:
+                    session_id = str(session_payload.get("session_id") or "") or None
+                if session_id:
+                    await self.session_service.update_session(
+                        session_id=session_id,
+                        ip_address=ip_address,
+                        user_agent=user_agent,
+                        device_id=device_id,
                         metadata={
                             "ip_address": ip_address,
                             "user_agent": user_agent,
                             "device_fingerprint": device_fingerprint,
                             "login_method": "password",
                         },
-                        refresh_token_family_id=refresh_token_family_id,
                     )
-                    session_id = None
-                    if session_payload is not None:
-                        session_id = str(session_payload.get("session_id") or "") or None
-                    if session_id:
-                        await self.session_service.update_session(
-                            session_id=session_id,
-                            ip_address=ip_address,
-                            user_agent=user_agent,
-                            device_id=device_id,
-                            metadata={
-                                "ip_address": ip_address,
-                                "user_agent": user_agent,
-                                "device_fingerprint": device_fingerprint,
-                                "login_method": "password",
-                            },
-                        )
 
-                if self.token_service is not None:
-                    access_token = self.token_service.create_access_token(
-                        str(user.id),
-                        extra_claims={"email": user.email, "user_id": str(user.id), "email_verified": user.email_verified},
-                        device_id=device_id,
-                        session_id=session_id,
-                    )
-                    refresh_token = self.token_service.create_refresh_token(
-                        str(user.id),
-                        extra_claims={"email": user.email, "user_id": str(user.id)},
-                        device_id=device_id,
-                        session_id=session_id,
-                        family_id=refresh_token_family_id,
-                    )
-                else:
-                    access_token = self._issue_access_token(user)
-                    refresh_token = self._issue_refresh_token(user)
-
-                await self._cache_token(refresh_token, token_type="refresh", user_id=user.id)
-                await self._log_event(
-                    "login_succeeded",
-                    user_id=user.id,
-                    metadata={
-                        "session_id": session_id,
-                        "device_id": device_id,
-                        "ip_address": ip_address,
-                        "user_agent": user_agent,
-                    },
+            if self.token_service is not None:
+                access_token = self.token_service.create_access_token(
+                    str(user.id),
+                    extra_claims={"email": user.email, "user_id": str(user.id), "email_verified": user.email_verified, "role": getattr(user, "role", None) or "user"},
+                    device_id=device_id,
+                    session_id=session_id,
                 )
-                return {
-                    "user": self._serialize_user(user),
-                    "access_token": access_token,
-                    "refresh_token": refresh_token,
-                    "token_type": "bearer",
-                    "expires_in": settings.access_token_expire_minutes * 60,
+                refresh_token = self.token_service.create_refresh_token(
+                    str(user.id),
+                    extra_claims={"email": user.email, "user_id": str(user.id)},
+                    device_id=device_id,
+                    session_id=session_id,
+                    family_id=refresh_token_family_id,
+                )
+            else:
+                access_token = self._issue_access_token(user)
+                refresh_token = self._issue_refresh_token(user)
+
+            await self._cache_token(refresh_token, token_type="refresh", user_id=user.id)
+            await self._log_event(
+                "login_succeeded",
+                user_id=user.id,
+                metadata={
                     "session_id": session_id,
-                }
+                    "device_id": device_id,
+                    "ip_address": ip_address,
+                    "user_agent": user_agent,
+                },
+            )
+            return {
+                "user": self._serialize_user(user),
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": "bearer",
+                "expires_in": settings.access_token_expire_minutes * 60,
+                "session_id": session_id,
+            }
         except Exception as exc:
             raise DatabaseException("Login failed.") from exc
 
@@ -499,7 +508,7 @@ class AuthService:
             if self.token_service is not None:
                 access_token = self.token_service.create_access_token(
                     str(user.id),
-                    extra_claims={"email": user.email, "user_id": str(user.id), "email_verified": user.email_verified},
+                    extra_claims={"email": user.email, "user_id": str(user.id), "email_verified": user.email_verified, "role": getattr(user, "role", None) or "user"},
                     device_id=device_id,
                     session_id=session_id,
                 )
@@ -584,6 +593,9 @@ class AuthService:
             claims = await self._decode_token_claims(access_token, expected_type="access")
         elif refresh_token:
             claims = await self._decode_token_claims(refresh_token, expected_type="refresh")
+
+        session_id = session_id or (str(claims.get("session_id")) if claims.get("session_id") is not None else None)
+        device_id = device_id or (str(claims.get("device_id")) if claims.get("device_id") is not None else None)
 
         resolved_user_id = user_id or self._extract_user_id_from_claims(claims)
         if resolved_user_id is not None:
@@ -1285,19 +1297,13 @@ class AuthService:
                                 continue
                             parts = key.split(":")
                             if len(parts) >= 4 and parts[1] == "access" and parts[2] == str(user.id):
-                                token_hash = parts[3] if len(parts) >= 4 else None
-                                if token_hash:
-                                    await self.redis_client.setex(f"auth:revoked:{token_hash}", self._token_ttl_seconds("access"), "1")
-                                    await self.redis_client.delete(key)
+                                await self.redis_client.delete(key)
                         async for key in self.redis_client.scan_iter(match="auth:refresh:*"):
                             if not isinstance(key, str):
                                 continue
                             parts = key.split(":")
                             if len(parts) >= 4 and parts[1] == "refresh" and parts[2] == str(user.id):
-                                token_hash = parts[3] if len(parts) >= 4 else None
-                                if token_hash:
-                                    await self.redis_client.setex(f"auth:revoked:{token_hash}", self._token_ttl_seconds("refresh"), "1")
-                                    await self.redis_client.delete(key)
+                                await self.redis_client.delete(key)
                     except Exception:
                         pass
 
@@ -1431,19 +1437,13 @@ class AuthService:
                                 continue
                             parts = key.split(":")
                             if len(parts) >= 4 and parts[1] == "access" and parts[2] == str(user.id):
-                                token_hash = parts[3] if len(parts) >= 4 else None
-                                if token_hash:
-                                    await self.redis_client.setex(f"auth:revoked:{token_hash}", self._token_ttl_seconds("access"), "1")
-                                    await self.redis_client.delete(key)
+                                await self.redis_client.delete(key)
                         async for key in self.redis_client.scan_iter(match="auth:refresh:*"):
                             if not isinstance(key, str):
                                 continue
                             parts = key.split(":")
                             if len(parts) >= 4 and parts[1] == "refresh" and parts[2] == str(user.id):
-                                token_hash = parts[3] if len(parts) >= 4 else None
-                                if token_hash:
-                                    await self.redis_client.setex(f"auth:revoked:{token_hash}", self._token_ttl_seconds("refresh"), "1")
-                                    await self.redis_client.delete(key)
+                                await self.redis_client.delete(key)
                     except Exception:
                         pass
 
@@ -1607,18 +1607,26 @@ class AuthService:
 
     async def _handle_failed_login(self, user: User) -> None:
         self._require_repository("user_repository", self.user_repository)
-        failed_attempts = (user.failed_login_attempts or 0) + 1
-        user.failed_login_attempts = failed_attempts
-        if failed_attempts >= settings.max_login_attempts:
-            user.account_locked_until = datetime.now(timezone.utc) + timedelta(minutes=settings.account_lock_duration_minutes)
-            user.status = "locked"
-        await self.user_repository.update_user(
-            user,
-            failed_login_attempts=user.failed_login_attempts,
-            account_locked_until=user.account_locked_until,
-            status=user.status,
-        )
-        await self._log_event("login_failed", user_id=user.id)
+        async with self.session.begin():
+            locked_user = await self._get_user_for_update(user.id)
+            if locked_user is None:
+                return
+            failed_attempts = (locked_user.failed_login_attempts or 0) + 1
+            locked_user.failed_login_attempts = failed_attempts
+            if failed_attempts >= settings.max_login_attempts:
+                locked_user.account_locked_until = datetime.now(timezone.utc) + timedelta(minutes=settings.account_lock_duration_minutes)
+                locked_user.status = "locked"
+            await self.user_repository.update_user(
+                locked_user,
+                failed_login_attempts=locked_user.failed_login_attempts,
+                account_locked_until=locked_user.account_locked_until,
+                status=locked_user.status,
+            )
+            await self._log_event("login_failed", user_id=locked_user.id)
+
+    async def _get_user_for_update(self, user_id: UUID) -> User | None:
+        result = await self.session.execute(select(User).where(User.id == user_id).with_for_update())
+        return result.scalar_one_or_none()
 
     async def _register_or_update_device(
         self,
@@ -1729,10 +1737,11 @@ class AuthService:
     async def _is_token_revoked(self, token: str) -> bool:
         if self.redis_client is None:
             return False
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        if hasattr(self.redis_client, "get"):
-            value = await self.redis_client.get(f"auth:revoked:{token_hash}")
-            return bool(value)
+        jti = self._extract_token_jti(token)
+        if not jti:
+            return False
+        if hasattr(self.redis_client, "exists"):
+            return bool(await self.redis_client.exists(f"{TokenService.REVOCATION_PREFIX}:{jti}"))
         return False
 
     async def _has_active_refresh_token(self, token: str, user_id: str | None) -> bool:
@@ -1749,11 +1758,39 @@ class AuthService:
     async def _revoke_token(self, token: str, *, token_type: str) -> None:
         if self.redis_client is None:
             return
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        claims = self._extract_token_claims(token)
+        jti = str(claims.get("jti") or "")
         if hasattr(self.redis_client, "setex"):
-            await self.redis_client.setex(f"auth:revoked:{token_hash}", self._token_ttl_seconds(token_type), "1")
+            if jti:
+                ttl_seconds = self._token_ttl_seconds(token_type)
+                exp = claims.get("exp")
+                if exp is not None:
+                    try:
+                        exp_dt = datetime.fromtimestamp(int(exp), tz=timezone.utc)
+                        ttl_seconds = max(int((exp_dt - datetime.now(timezone.utc)).total_seconds()), 60)
+                    except (TypeError, ValueError):
+                        ttl_seconds = self._token_ttl_seconds(token_type)
+                await self.redis_client.setex(f"{TokenService.REVOCATION_PREFIX}:{jti}", ttl_seconds, "1")
         if hasattr(self.redis_client, "delete"):
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
             await self.redis_client.delete(f"auth:{token_type}:{token_hash}")
+
+    def _extract_token_claims(self, token: str) -> dict[str, Any]:
+        if self.token_service is not None and hasattr(self.token_service, "extract_claims"):
+            claims = self.token_service.extract_claims(token)
+            if isinstance(claims, dict):
+                return claims
+        try:
+            return self.jwt_utils.decode_token(token)
+        except Exception:
+            return {}
+
+    def _extract_token_jti(self, token: str) -> str | None:
+        claims = self._extract_token_claims(token)
+        jti = claims.get("jti")
+        if not jti:
+            return None
+        return str(jti)
 
     def _issue_access_token(self, user: User) -> str:
         return self.jwt_utils.create_access_token(
@@ -1762,6 +1799,7 @@ class AuthService:
                 "email": user.email,
                 "user_id": str(user.id),
                 "email_verified": user.email_verified,
+                "role": getattr(user, "role", None) or "user",
                 "jti": uuid4().hex,
             },
         )

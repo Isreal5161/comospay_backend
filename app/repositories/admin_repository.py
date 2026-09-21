@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update, delete
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.admin import Admin
@@ -50,8 +50,8 @@ class AdminRepository:
         if descending:
             order_column = order_column.desc()
 
-        count_result = await self.session.execute(select(Admin))
-        total = len(count_result.scalars().all())
+        count_result = await self.session.execute(select(func.count(Admin.id)))
+        total = int(count_result.scalar_one() or 0)
 
         result = await self.session.execute(
             select(Admin)

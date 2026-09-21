@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.transaction import Transaction
@@ -166,28 +167,32 @@ class WalletFundingService:
         self._require_repository(self.wallet_repository)
         self._require_repository(self.transaction_repository)
 
-        transaction = await self._get_transaction(transaction_id=transaction_id, reference=reference)
-        if not transaction:
-            raise ValidationException("Funding transaction not found.")
-
-        if transaction.status.lower() in {"completed", "succeeded", "credited"}:
-            return self._serialize_transaction(transaction)
-
-        if transaction.status.lower() in {"reversed", "failed", "cancelled", "voided"}:
-            raise WalletException("Funding transaction is not eligible for credit.")
-
-        wallet_id = transaction.wallet_id
-        user_id = transaction.user_id
-        if wallet_id is None:
-            raise ValidationException("Funding transaction is missing a wallet identifier.")
-        if user_id is None:
-            raise ValidationException("Funding transaction is missing a user identifier.")
-
-        wallet = await self._get_wallet_and_validate_ownership(wallet_id=wallet_id, user_id=user_id)
-        self._validate_wallet_state(wallet)
-
         try:
             async with self._session_scope():
+                transaction = await self._get_transaction_for_update(transaction_id=transaction_id, reference=reference)
+                if not transaction:
+                    raise ValidationException("Funding transaction not found.")
+
+                metadata = self._parse_metadata(transaction.metadata_payload)
+                if metadata.get("wallet_credit_applied") is True:
+                    return self._serialize_transaction(transaction)
+
+                if transaction.status.lower() in {"completed", "succeeded", "credited"}:
+                    return self._serialize_transaction(transaction)
+
+                if transaction.status.lower() in {"reversed", "failed", "cancelled", "voided"}:
+                    raise WalletException("Funding transaction is not eligible for credit.")
+
+                wallet_id = transaction.wallet_id
+                user_id = transaction.user_id
+                if wallet_id is None:
+                    raise ValidationException("Funding transaction is missing a wallet identifier.")
+                if user_id is None:
+                    raise ValidationException("Funding transaction is missing a user identifier.")
+
+                wallet = await self._get_wallet_and_validate_ownership(wallet_id=wallet_id, user_id=user_id)
+                self._validate_wallet_state(wallet)
+
                 updated_available = wallet.available_balance + transaction.amount
                 updated_ledger = wallet.ledger_balance + transaction.amount
                 wallet.available_balance = updated_available
@@ -198,7 +203,10 @@ class WalletFundingService:
                     ledger_balance=updated_ledger,
                 )
                 transaction.status = "completed"
-                transaction.metadata_payload = self._merge_metadata(transaction.metadata_payload, {"credited": True})
+                transaction.metadata_payload = self._merge_metadata(
+                    transaction.metadata_payload,
+                    {"credited": True, "wallet_credit_applied": True},
+                )
                 await self.transaction_repository.update_transaction(transaction, status=transaction.status, metadata_payload=transaction.metadata_payload)
                 await self._log_event("wallet_funding_credited", user_id=transaction.user_id, metadata={"reference": transaction.reference})
                 return self._serialize_transaction(transaction, wallet=wallet)
@@ -375,7 +383,10 @@ class WalletFundingService:
         if session is None:
             return
         result = await session.execute(
-            session.query(Transaction).filter(Transaction.provider_reference == provider_reference)  # type: ignore[attr-defined]
+            select(Transaction).where(
+                Transaction.provider_name == provider_name,
+                Transaction.provider_reference == provider_reference,
+            )
         )
         existing = result.scalar_one_or_none()
         if existing is not None:
@@ -397,9 +408,29 @@ class WalletFundingService:
             if session is None:
                 return None
             result = await session.execute(
-                session.query(Transaction).filter(Transaction.provider_reference == provider_reference)  # type: ignore[attr-defined]
+                select(Transaction).where(Transaction.provider_reference == provider_reference)
             )
             return result.scalar_one_or_none()
+        return None
+
+    async def _get_transaction_for_update(
+        self,
+        *,
+        transaction_id: UUID | None = None,
+        reference: str | None = None,
+    ) -> Transaction | None:
+        if transaction_id is not None:
+            getter = getattr(self.transaction_repository, "get_by_id_for_update", None)
+            if callable(getter):
+                result = getter(transaction_id)
+                return await self._await_if_needed(result)
+            return await self.transaction_repository.get_by_id(transaction_id)
+        if reference is not None:
+            getter = getattr(self.transaction_repository, "get_by_reference_for_update", None)
+            if callable(getter):
+                result = getter(reference)
+                return await self._await_if_needed(result)
+            return await self.transaction_repository.get_by_reference(reference)
         return None
 
     async def _dispatch_provider_call(self, method_name: str, **kwargs: Any) -> dict[str, Any]:
@@ -504,6 +535,23 @@ class WalletFundingService:
         existing_data.update(safe_data)
         return json.dumps(existing_data, default=str)
 
+    def _parse_metadata(self, value: str | None) -> dict[str, Any]:
+        if not value:
+            return {}
+        import json
+
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {"value": parsed}
+        except json.JSONDecodeError:
+            try:
+                import ast
+
+                parsed = ast.literal_eval(value)
+                return parsed if isinstance(parsed, dict) else {"value": parsed}
+            except Exception:
+                return {"value": value}
+
     def _serialize_transaction(self, transaction: Transaction, *, wallet: Wallet | None = None) -> dict[str, Any]:
         return {
             "id": str(transaction.id),
@@ -530,12 +578,39 @@ class WalletFundingService:
             raise RuntimeError("Required repository is not configured for WalletFundingService.")
 
     def _session_scope(self) -> Any:
-        if self.session is None:
+        session = self._resolve_session()
+        if session is None:
             return _NullSessionContext()
-        return self.session.begin()
+        if session.in_transaction():
+            return _ActiveSessionContext(session)
+        return session.begin()
+
+    def _resolve_session(self) -> AsyncSession | None:
+        if self.session is not None:
+            return self.session
+        repository_session = getattr(self.transaction_repository, "session", None)
+        if isinstance(repository_session, AsyncSession):
+            return repository_session
+        repository_session = getattr(self.wallet_repository, "session", None)
+        if isinstance(repository_session, AsyncSession):
+            return repository_session
+        return None
 
     def _make_reference(self, prefix: str) -> str:
         return f"{prefix}-{uuid4().hex[:12]}"
+
+
+class _ActiveSessionContext:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def __aenter__(self) -> None:
+        if not self.session.in_transaction():
+            raise RuntimeError("Expected an active database transaction.")
+        return None
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        return False
 
 
 class _NullSessionContext:

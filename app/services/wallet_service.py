@@ -53,20 +53,20 @@ class WalletService:
             metadata_payload=metadata_payload,
         )
 
-    async def get_wallet(self, *, wallet_id: UUID) -> dict[str, Any]:
+    async def get_wallet(self, *, wallet_id: UUID, user_id: UUID | None = None) -> dict[str, Any]:
         """Delegate wallet lookup to the wallet manager."""
-        self._log_entry("get_wallet", wallet_id=wallet_id)
-        return await self.wallet_manager.get_wallet(wallet_id=wallet_id)
+        self._log_entry("get_wallet", wallet_id=wallet_id, user_id=user_id)
+        return await self.wallet_manager.get_wallet(wallet_id=wallet_id, user_id=user_id)
 
     async def get_wallet_by_user(self, *, user_id: UUID, wallet_type: str | None = None) -> dict[str, Any]:
         """Delegate wallet lookup by user to the wallet manager."""
         self._log_entry("get_wallet_by_user", user_id=user_id)
         return await self.wallet_manager.get_wallet_by_user(user_id=user_id, wallet_type=wallet_type)
 
-    async def get_wallet_balance(self, *, wallet_id: UUID) -> dict[str, Any]:
+    async def get_wallet_balance(self, *, wallet_id: UUID, user_id: UUID | None = None) -> dict[str, Any]:
         """Delegate wallet balance lookup to the wallet manager."""
-        self._log_entry("get_wallet_balance", wallet_id=wallet_id)
-        return await self.wallet_manager.get_wallet_balance(wallet_id=wallet_id)
+        self._log_entry("get_wallet_balance", wallet_id=wallet_id, user_id=user_id)
+        return await self.wallet_manager.get_wallet_balance(wallet_id=wallet_id, user_id=user_id)
 
     async def freeze_wallet(self, *, wallet_id: UUID, reason: str | None = None) -> dict[str, Any]:
         """Delegate wallet freeze to the wallet manager."""

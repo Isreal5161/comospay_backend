@@ -8,7 +8,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from app.config.jwt import decode_token
+from app.config.redis import get_redis
 from app.config.settings import settings
+from app.services.auth.token_service import TokenService
 from app.utils.logger import get_logger
 from app.utils.response import error_response
 
@@ -58,23 +60,34 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return self._unauthorized_response(request, "Authentication token is required.")
 
         try:
-            payload = decode_token(token)
-        except ValueError as exc:
+            # Use TokenService as the authoritative validator so middleware
+            # and higher-level auth utilities enforce the same rules.
+            token_service = TokenService()
+            claims = token_service.validate_token(token, expected_type="access")
+        except Exception as exc:
             self._log_auth_failure(request, str(exc), "token_validation")
             return self._unauthorized_response(request, self._message_for_error(str(exc)))
 
-        if not self._validate_payload(payload):
-            self._log_auth_failure(request, "Token payload validation failed.", "payload_validation")
-            return self._unauthorized_response(request, "Authentication token is invalid.")
+        # Ensure token isn't revoked. TokenService exposes an async revocation check.
+        try:
+            revoked = await token_service.check_revoked_token(token=token)
+        except Exception:
+            # Conservatively deny access if revocation state cannot be confirmed.
+            self._log_auth_failure(request, "Token revocation check failed.", "revocation_check_failure")
+            return self._unauthorized_response(request, "Authentication token could not be validated.")
 
-        if self._is_revoked_token(payload):
+        if revoked:
             self._log_auth_failure(request, "Token is revoked.", "token_revocation")
             return self._unauthorized_response(request, "Authentication token has been revoked.")
 
-        user_context = AuthenticatedUser.from_claims(payload)
+        if not self._validate_payload(claims):
+            self._log_auth_failure(request, "Token payload validation failed.", "payload_validation")
+            return self._unauthorized_response(request, "Authentication token is invalid.")
+
+        user_context = AuthenticatedUser.from_claims(claims)
         request.state.user = user_context
         request.state.auth_user = user_context
-        request.state.auth_payload = payload
+        request.state.auth_payload = claims
         request.state.token_type = user_context.token_type
         request.state.is_authenticated = True
 
@@ -113,14 +126,26 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return False
         return True
 
-    def _is_revoked_token(self, payload: dict[str, Any]) -> bool:
+    async def _is_revoked_token(self, payload: dict[str, Any]) -> bool:
         revoked = payload.get("revoked")
         blacklisted = payload.get("blacklisted")
         if isinstance(revoked, bool) and revoked:
             return True
         if isinstance(blacklisted, bool) and blacklisted:
             return True
-        return False
+        jti = payload.get("jti")
+        if not jti:
+            return False
+        redis_client = await self._get_redis_client()
+        if redis_client is None or not hasattr(redis_client, "exists"):
+            return False
+        return bool(await redis_client.exists(f"{TokenService.REVOCATION_PREFIX}:{jti}"))
+
+    async def _get_redis_client(self) -> Any | None:
+        try:
+            return await get_redis()
+        except Exception:
+            return None
 
     def _unauthorized_response(self, request: Request, message: str) -> JSONResponse:
         payload = error_response(message=message, status_code=401)

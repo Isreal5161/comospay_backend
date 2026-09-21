@@ -326,6 +326,13 @@ class AirtimeService:
         self._log_completion("generate_reconciliation_report")
         return result
 
+    async def get_transaction_user_id_by_reference(self, reference: str) -> UUID | None:
+        """Get the user_id for a transaction by reference. Used for authorization checks."""
+        transaction = await self.transaction_repository.get_by_reference(reference)
+        if transaction is None:
+            return None
+        return transaction.user_id
+
     def _log_entry(self, operation: str, **context: Any) -> None:
         self.logger.info("airtime_service_entry", extra={"operation": operation, **context})
 

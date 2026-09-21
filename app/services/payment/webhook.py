@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -70,7 +71,6 @@ class PaymentWebhookService:
         """Process a normalized payment webhook event and apply the appropriate transaction update."""
         self._validate_payload(payload)
         self._validate_provider(provider_name)
-        await self.ignore_duplicate_webhooks(event_id=event_id, provider_name=provider_name)
         await self.validate_webhook_signature(
             payload=self._encode_payload(payload),
             signature=signature,
@@ -81,11 +81,23 @@ class PaymentWebhookService:
 
         async with self._transaction_scope():
             reference = self._extract_reference(payload)
-            transaction = await self.transaction_repository.get_by_reference(reference)
+            transaction = await self.transaction_repository.get_by_reference_for_update(reference)
             if transaction is None:
                 raise ValidationException("Webhook reference was not found.")
 
+            await self.ignore_duplicate_webhooks(event_id=event_id, provider_name=provider_name)
+
             event_type = self._extract_event_type(payload)
+            existing_metadata = self._parse_metadata(transaction.metadata_payload)
+            event_key = self._dedupe_key(provider_name=provider_name, event_id=event_id, payload=payload, reference=reference)
+            processed_event_ids = self._read_processed_event_ids(existing_metadata)
+            if event_key and event_key in processed_event_ids:
+                self.logger.info(
+                    "payment_webhook_duplicate_ignored",
+                    extra={"provider": provider_name, "event_id": event_id, "reference": reference},
+                )
+                return await self._build_response(transaction, event_type=event_type)
+
             self.logger.info(
                 "payment_webhook_received",
                 extra={"provider": provider_name, "event_type": event_type, "reference": reference},
@@ -96,7 +108,12 @@ class PaymentWebhookService:
             transaction.provider_name = provider_name
             transaction.provider_reference = self._extract_provider_reference(payload)
             transaction.provider_transaction_id = self._extract_provider_transaction_id(payload)
-            transaction.metadata_payload = self._serialize_metadata({"event_id": event_id, "event_type": event_type, "provider": provider_name})
+            metadata = self._parse_metadata(transaction.metadata_payload)
+            metadata.update({"event_id": event_id or metadata.get("event_id"), "event_type": event_type, "provider": provider_name})
+            if event_key:
+                processed_event_ids = self._append_processed_event_id(processed_event_ids, event_key)
+                metadata["processed_event_ids"] = processed_event_ids
+            transaction.metadata_payload = self._serialize_metadata(metadata)
             transaction = await self.transaction_repository.update_transaction(
                 transaction,
                 status=transaction.status,
@@ -165,12 +182,21 @@ class PaymentWebhookService:
             raise PaymentException("Duplicate webhook event detected.")
 
     async def _credit_wallet(self, transaction: Transaction) -> None:
-        wallet = await self.wallet_repository.get_by_id(transaction.wallet_id) if transaction.wallet_id else None
+        metadata = self._parse_metadata(transaction.metadata_payload)
+        if metadata.get("wallet_credit_applied") is True:
+            return
+
+        wallet = await self.wallet_repository.get_by_id_for_update(transaction.wallet_id) if transaction.wallet_id else None
         if wallet is None:
             raise ValidationException("Wallet was not found for webhook crediting.")
         wallet.available_balance = wallet.available_balance + transaction.amount
         wallet.ledger_balance = wallet.ledger_balance + transaction.amount
         await self.wallet_repository.update_wallet(wallet, available_balance=wallet.available_balance, ledger_balance=wallet.ledger_balance)
+
+        metadata["wallet_credit_applied"] = True
+        metadata["wallet_credit_source"] = "webhook"
+        transaction.metadata_payload = self._serialize_metadata(metadata)
+        await self.transaction_repository.update_transaction(transaction, metadata_payload=transaction.metadata_payload)
 
     def _validate_payload(self, payload: dict[str, Any]) -> None:
         if not isinstance(payload, dict) or not payload:
@@ -231,7 +257,56 @@ class PaymentWebhookService:
     def _serialize_metadata(self, payload: dict[str, Any] | None) -> str | None:
         if not payload:
             return None
-        return str(payload)
+        return json.dumps(payload, default=str)
+
+    def _parse_metadata(self, payload: str | None) -> dict[str, Any]:
+        if not payload:
+            return {}
+        try:
+            parsed = json.loads(payload)
+            return parsed if isinstance(parsed, dict) else {"value": parsed}
+        except json.JSONDecodeError:
+            try:
+                import ast
+
+                parsed = ast.literal_eval(payload)
+                return parsed if isinstance(parsed, dict) else {"value": parsed}
+            except Exception:
+                return {"value": payload}
+
+    def _dedupe_key(
+        self,
+        *,
+        provider_name: str,
+        event_id: str | None,
+        payload: dict[str, Any],
+        reference: str,
+    ) -> str | None:
+        if event_id:
+            return f"{provider_name}:{event_id}"
+
+        provider_reference = self._extract_provider_reference(payload) or self._extract_provider_transaction_id(payload)
+        if provider_reference:
+            return f"{provider_name}:{provider_reference}"
+        return f"{provider_name}:{reference}"
+
+    def _event_key(self, *, provider_name: str, event_id: str | None) -> str | None:
+        if not event_id:
+            return None
+        return f"{provider_name}:{event_id}"
+
+    def _read_processed_event_ids(self, metadata: dict[str, Any]) -> list[str]:
+        value = metadata.get("processed_event_ids")
+        if isinstance(value, list):
+            return [str(item) for item in value if item]
+        return []
+
+    def _append_processed_event_id(self, processed_event_ids: list[str], event_key: str) -> list[str]:
+        if event_key in processed_event_ids:
+            return processed_event_ids
+        updated = processed_event_ids + [event_key]
+        # Keep bounded history to avoid unbounded payload growth.
+        return updated[-50:]
 
     async def _build_response(self, transaction: Transaction, *, event_type: str) -> dict[str, Any]:
         return {

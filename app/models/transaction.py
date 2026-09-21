@@ -17,6 +17,7 @@ class Transaction(Base):
 
     __table_args__ = (
         UniqueConstraint("reference", name="uq_transactions_reference"),
+        UniqueConstraint("provider_name", "provider_reference", name="uq_transactions_provider_ref"),
         Index("ix_transactions_user_created", "user_id", "created_at"),
         Index("ix_transactions_wallet_created", "wallet_id", "created_at"),
         Index("ix_transactions_status_created", "status", "created_at"),

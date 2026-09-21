@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
@@ -169,10 +169,10 @@ async def reset_password(payload: PasswordResetRequest, controller: AuthControll
 
 
 @router.post("/change-password", status_code=status.HTTP_200_OK)
-async def change_password(payload: ChangePasswordRequest, controller: AuthController = Depends(get_auth_controller)) -> dict[str, Any]:
-    return await controller.change_password(payload)
+async def change_password(payload: ChangePasswordRequest, request: Request, controller: AuthController = Depends(get_auth_controller)) -> dict[str, Any]:
+    return await controller.change_password(payload, request=request)
 
 
 @router.post("/verify-device", status_code=status.HTTP_200_OK)
-async def verify_device(payload: DeviceVerificationRequest, controller: AuthController = Depends(get_auth_controller)) -> dict[str, Any]:
-    return await controller.verify_device(payload)
+async def verify_device(payload: DeviceVerificationRequest, request: Request, controller: AuthController = Depends(get_auth_controller)) -> dict[str, Any]:
+    return await controller.verify_device(payload, request=request)

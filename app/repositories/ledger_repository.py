@@ -110,8 +110,8 @@ class LedgerRepository:
 
         try:
             query = select(Ledger).where(Ledger.wallet_id == wallet_id)
-            count_result = await self.session.execute(query)
-            total = len(count_result.scalars().all())
+            count_result = await self.session.execute(select(func.count(Ledger.ledger_id)).select_from(query.subquery()))
+            total = int(count_result.scalar_one() or 0)
 
             result = await self.session.execute(
                 query.order_by(Ledger.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
@@ -130,8 +130,8 @@ class LedgerRepository:
 
         try:
             query = select(Ledger).where(Ledger.user_id == user_id)
-            count_result = await self.session.execute(query)
-            total = len(count_result.scalars().all())
+            count_result = await self.session.execute(select(func.count(Ledger.ledger_id)).select_from(query.subquery()))
+            total = int(count_result.scalar_one() or 0)
 
             result = await self.session.execute(
                 query.order_by(Ledger.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
@@ -192,8 +192,8 @@ class LedgerRepository:
             if end_date:
                 stmt = stmt.where(Ledger.created_at <= end_date)
 
-            count_result = await self.session.execute(stmt)
-            total = len(count_result.scalars().all())
+            count_result = await self.session.execute(select(func.count(Ledger.ledger_id)).select_from(stmt.subquery()))
+            total = int(count_result.scalar_one() or 0)
 
             result = await self.session.execute(
                 stmt.order_by(Ledger.created_at.desc()).offset((page - 1) * page_size).limit(page_size)

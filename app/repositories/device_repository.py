@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.device import Device
@@ -44,8 +44,8 @@ class DeviceRepository:
             page_size = 20
 
         query = select(Device).where(Device.user_id == user_id)
-        count_result = await self.session.execute(query)
-        total = len(count_result.scalars().all())
+        count_result = await self.session.execute(select(func.count(Device.id)).where(Device.user_id == user_id))
+        total = int(count_result.scalar_one() or 0)
 
         order_column = getattr(Device, order_by, Device.last_seen_at)
         if descending:

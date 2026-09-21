@@ -14,6 +14,7 @@ from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
 from app.services.provider_service import ProviderService
+from app.services.vtu.status import normalize_vtu_status
 from app.services.wallet_service import WalletService
 from app.utils.exceptions import PaymentException, ValidationException, WalletException
 
@@ -268,6 +269,9 @@ class TVPurchaseService:
         return wallet
 
     async def _debit_wallet(self, *, transaction: Transaction, wallet: Wallet, amount: Decimal) -> None:
+        metadata = self._parse_metadata(transaction.metadata_payload)
+        if metadata.get("debit_applied") is True:
+            return
         if wallet.available_balance < amount:
             raise WalletException("Insufficient wallet balance for TV purchase.")
         wallet.available_balance = wallet.available_balance - amount
@@ -277,7 +281,6 @@ class TVPurchaseService:
             available_balance=wallet.available_balance,
             ledger_balance=wallet.ledger_balance,
         )
-        metadata = self._parse_metadata(transaction.metadata_payload)
         metadata["debit_applied"] = True
         transaction.metadata_payload = self._serialize_metadata(metadata)
         await self.transaction_repository.update_transaction(transaction, metadata_payload=transaction.metadata_payload)
@@ -309,16 +312,21 @@ class TVPurchaseService:
         await self.transaction_repository.update_transaction(transaction, metadata_payload=transaction.metadata_payload)
 
     async def _handle_provider_failure(self, *, transaction: Transaction, reason: str) -> None:
-        self.logger.warning("tv_purchase_failed", extra={"reference": transaction.reference, "reason": reason})
-        if transaction.status not in {"failed", "cancelled", "reversed"}:
-            transaction.status = "failed"
-            transaction.metadata_payload = self._serialize_metadata(
+        async with self._transaction_scope():
+            current = await self.transaction_repository.get_by_reference(transaction.reference)
+            if current is None:
+                raise ValidationException("Purchase transaction was not found.")
+            if current.status not in {"failed", "cancelled", "reversed"}:
+                current.status = "failed"
+            current.metadata_payload = self._serialize_metadata(
                 {
-                    **self._parse_metadata(transaction.metadata_payload),
+                    **self._parse_metadata(current.metadata_payload),
                     "failure_reason": reason,
+                    "reversed": False,
                 }
             )
-            await self.transaction_repository.update_transaction(transaction, status=transaction.status, metadata_payload=transaction.metadata_payload)
+            await self.transaction_repository.update_transaction(current, status=current.status, metadata_payload=current.metadata_payload)
+            self.logger.warning("tv_purchase_failed", extra={"reference": current.reference, "reason": reason})
 
     async def _resolve_transaction(self, transaction: Transaction | None, reference: str | None) -> Transaction:
         if transaction is not None:
@@ -417,16 +425,7 @@ class TVPurchaseService:
             return "{}"
 
     def _normalize_status(self, status: Any) -> str:
-        if not status or not isinstance(status, str):
-            return "pending"
-        normalized = status.strip().lower()
-        if normalized in {"success", "succeeded", "completed", "settled"}:
-            return "succeeded"
-        if normalized in {"failed", "failure", "cancelled", "cancelled", "reversed"}:
-            return "failed"
-        if normalized in {"pending", "processing", "queued"}:
-            return "pending"
-        return "pending"
+        return normalize_vtu_status(status)
 
     def _normalize_provider_manager_response(self, result: Any) -> dict[str, Any]:
         if not isinstance(result, dict):

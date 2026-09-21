@@ -34,6 +34,9 @@ from app.middleware.logging_middleware import LoggingMiddleware
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.middleware.request_id_middleware import RequestIDMiddleware
 from app.middleware.security_headers_middleware import SecurityHeadersMiddleware
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def create_app() -> FastAPI:
@@ -69,7 +72,12 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(AuthMiddleware, public_paths=_get_public_paths())
-    app.add_middleware(AdminMiddleware, allowed_roles=["super_admin", "admin", "support", "auditor"])
+    # Admin allowed roles may be configured via settings.ADMIN_ALLOWED_ROLES (comma-separated or list).
+    configured_roles = getattr(settings, "admin_allowed_roles", None)
+    if isinstance(configured_roles, str):
+        configured_roles = [r.strip() for r in configured_roles.split(",") if r.strip()]
+    allowed_roles = configured_roles or ["super_admin", "admin"]
+    app.add_middleware(AdminMiddleware, allowed_roles=allowed_roles)
     app.add_middleware(AuditMiddleware)
 
     if _HAS_PROXY_HEADERS_MIDDLEWARE:
@@ -114,8 +122,7 @@ def create_app() -> FastAPI:
 
             await start_background_retry_worker(app)
         except Exception:
-            # don't fail startup if background worker can't be started
-            pass
+            logger.exception("Failed to start virtual-account retry background worker")
 
     @app.on_event("shutdown")
     async def shutdown_event() -> None:
@@ -125,7 +132,7 @@ def create_app() -> FastAPI:
 
             await stop_background_retry_worker(app)
         except Exception:
-            pass
+            logger.exception("Failed to stop virtual-account retry background worker")
         await disconnect_redis()
         engine.dispose()
 
@@ -176,8 +183,16 @@ def _get_cors_origins() -> list[str]:
     """Return CORS origins from configuration, supporting comma-delimited values."""
     origins = _get_cors_setting("allow_origins", ["*"])
     if isinstance(origins, str):
-        return [origin.strip() for origin in origins.split(",") if origin.strip()]
-    return [str(origin).strip() for origin in origins if str(origin).strip()]
+        resolved = [origin.strip() for origin in origins.split(",") if origin.strip()]
+    else:
+        resolved = [str(origin).strip() for origin in origins if str(origin).strip()]
+
+    if getattr(settings, "app_env", "development") == "production":
+        if not resolved or any(origin == "*" for origin in resolved):
+            raise RuntimeError(
+                "In production, CORS allow_origins must be explicitly configured and must not contain wildcard '*'."
+            )
+    return resolved
 
 
 def _get_cors_setting(name: str, default: Any) -> Any:
@@ -191,11 +206,22 @@ def _get_cors_setting(name: str, default: Any) -> Any:
 def _get_trusted_hosts() -> list[str]:
     """Return trusted hosts from configuration with a safe default."""
     value = getattr(settings, "trusted_hosts", None)
-    if value in (None, ""):
-        return ["*"]
     if isinstance(value, str):
-        return [host.strip() for host in value.split(",") if host.strip()]
-    return [str(host).strip() for host in value if str(host).strip()]
+        resolved = [host.strip() for host in value.split(",") if host.strip()]
+    elif value in (None, ""):
+        resolved = []
+    else:
+        resolved = [str(host).strip() for host in value if str(host).strip()]
+
+    if getattr(settings, "app_env", "development") == "production":
+        if not resolved or any(host == "*" for host in resolved):
+            raise RuntimeError(
+                "In production, trusted_hosts must be explicitly configured and must not contain wildcard '*'."
+            )
+
+    if not resolved:
+        return ["*"]
+    return resolved
 
 
 def _get_public_paths() -> list[str]:

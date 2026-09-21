@@ -85,7 +85,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     async def _handle_redis_failure(self, request: Request, call_next: Callable[[Request], Awaitable[Response]], exc: Exception) -> Response:
         self._log_failure(request, exc)
-        fail_open = bool(self._get_setting("rate_limit_fail_open", True))
+        explicit = getattr(settings, "rate_limit_fail_open", None)
+        if explicit is not None:
+            fail_open = bool(explicit)
+            if fail_open:
+                return await call_next(request)
+            return JSONResponse(
+                content=error_response("Rate limiting service is temporarily unavailable.", status_code=503),
+                status_code=503,
+            )
+
+        path = request.url.path.lower()
+        fail_open = self._should_fail_open(path)
         if fail_open:
             return await call_next(request)
         return JSONResponse(
@@ -126,6 +137,29 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         elif path.startswith("/provider") or "/provider/" in path:
             buckets.append(("provider", self._get_limit("provider")))
         elif path.startswith("/admin") or "/admin/" in path:
+            buckets.append(("admin", self._get_limit("admin")))
+        return buckets
+
+    def _should_fail_open(self, path: str) -> bool:
+        buckets = self._get_buckets_for_path(path)
+        sensitive_buckets = {"auth", "otp", "wallet", "payment", "provider", "admin"}
+        return not any(bucket_name in sensitive_buckets for bucket_name, _ in buckets)
+
+    def _get_buckets_for_path(self, path: str) -> list[tuple[str, int]]:
+        normalized = path.lower()
+        buckets: list[tuple[str, int]] = [("global", self._get_limit("global"))]
+
+        if normalized.startswith("/auth") or "/auth/" in normalized or normalized == "/login" or normalized == "/register":
+            buckets.append(("auth", self._get_limit("auth")))
+        elif "/otp" in normalized or normalized.startswith("/otp"):
+            buckets.append(("otp", self._get_limit("otp")))
+        elif normalized.startswith("/wallet") or "/wallet/" in normalized:
+            buckets.append(("wallet", self._get_limit("wallet")))
+        elif normalized.startswith("/payment") or "/payment/" in normalized:
+            buckets.append(("payment", self._get_limit("payment")))
+        elif normalized.startswith("/provider") or "/provider/" in normalized:
+            buckets.append(("provider", self._get_limit("provider")))
+        elif normalized.startswith("/admin") or "/admin/" in normalized:
             buckets.append(("admin", self._get_limit("admin")))
         return buckets
 

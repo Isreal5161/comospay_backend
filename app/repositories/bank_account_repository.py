@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.bank_account import BankAccount
@@ -44,8 +44,8 @@ class BankAccountRepository:
             page_size = 20
 
         query = select(BankAccount).where(BankAccount.user_id == user_id)
-        count_result = await self.session.execute(query)
-        total = len(count_result.scalars().all())
+        count_result = await self.session.execute(select(func.count(BankAccount.id)).where(BankAccount.user_id == user_id))
+        total = int(count_result.scalar_one() or 0)
 
         order_column = getattr(BankAccount, order_by, BankAccount.created_at)
         if descending:

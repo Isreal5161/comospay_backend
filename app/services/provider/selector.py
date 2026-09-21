@@ -66,14 +66,28 @@ class ProviderSelector:
         """Invalidate cached provider rankings when provider state changes."""
         if self.redis_client is None:
             return
-        pattern = self._cache_key(category=category, service_type=None, environment=None)
-        if self.redis_client is not None:
-            try:
-                keys = await self.redis_client.keys(pattern)
-                for key in keys:
+        # Use non-blocking SCAN to iterate matching keys instead of KEYS (O(N) on Redis keyspace).
+        base = self._cache_key(category=category, service_type=None, environment=None)
+        pattern = f"{base}*"
+        try:
+            async for key in self.redis_client.scan_iter(match=pattern):
+                try:
                     await self.redis_client.delete(key)
-            except Exception as exc:
-                self.logger.warning("provider_cache_invalidation_failed", extra={"error": str(exc)})
+                except Exception:
+                    # Best-effort deletion; continue removing other keys
+                    self.logger.debug("provider_cache_delete_failed", extra={"key": str(key)})
+        except Exception as exc:
+            self.logger.warning("provider_cache_invalidation_failed", extra={"error": str(exc)})
+
+    async def update_provider_priority(self, *, provider_id: UUID, priority: int) -> Provider:
+        """Persist provider priority changes and invalidate selection caches."""
+        provider = await self.provider_repository.get_provider_by_id(provider_id)
+        if provider is None:
+            raise ValidationException("Provider not found.")
+
+        updated = await self.provider_repository.update_provider(provider, priority=int(priority))
+        await self.invalidate_provider_cache(category=updated.category)
+        return updated
 
     async def _get_cached_selection(self, cache_key: str) -> Provider | None:
         if self.redis_client is None:

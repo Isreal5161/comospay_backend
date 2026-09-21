@@ -46,7 +46,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 },
             )
         except Exception:
-            pass
+            logger.exception("Failed to emit audit event", extra={"event_type": "audit", "event": event})
 
     def _build_audit_event(self, request: Request, response: Response, request_id: str | None, started_at: float) -> dict[str, Any]:
         user = getattr(request.state, "user", None)

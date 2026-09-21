@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
@@ -120,9 +120,10 @@ async def get_notification_count(
 @router.post("/mark-read", status_code=status.HTTP_200_OK)
 async def mark_as_read(
     payload: NotificationReadSchema,
+    request: Request,
     controller: NotificationController = Depends(get_notification_controller),
 ) -> dict[str, Any]:
-    return await controller.mark_as_read(payload)
+    return await controller.mark_as_read(payload, request=request)
 
 
 @router.post("/mark-all-read", status_code=status.HTTP_200_OK)
@@ -143,14 +144,16 @@ async def send_test_notification(
 @router.get("/{notification_id}", status_code=status.HTTP_200_OK)
 async def get_notification_detail(
     notification_id: str,
+    request: Request,
     controller: NotificationController = Depends(get_notification_controller),
 ) -> dict[str, Any]:
-    return await controller.get_notification_detail(notification_id=UUID(notification_id))
+    return await controller.get_notification_detail(notification_id=UUID(notification_id), request=request)
 
 
 @router.delete("/{notification_id}", status_code=status.HTTP_200_OK)
 async def delete_notification(
     notification_id: str,
+    request: Request,
     controller: NotificationController = Depends(get_notification_controller),
 ) -> dict[str, Any]:
-    return await controller.delete_notification(notification_id=UUID(notification_id))
+    return await controller.delete_notification(notification_id=UUID(notification_id), request=request)

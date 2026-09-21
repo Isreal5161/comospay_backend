@@ -4,23 +4,7 @@ import logging
 from importlib import import_module
 from typing import Any
 
-
-class _PendingSecurityService:
-    """Fallback adapter used until the concrete security sub-service is implemented."""
-
-    def __init__(self, service_name: str, logger: logging.Logger | None = None) -> None:
-        self._service_name = service_name
-        self.logger = logger or logging.getLogger(__name__)
-
-    def __getattr__(self, name: str) -> Any:
-        async def _missing_method(*args: Any, **kwargs: Any) -> Any:
-            return {
-                "success": False,
-                "service": self._service_name,
-                "error": f"Security sub-service '{self._service_name}' has not been implemented yet.",
-            }
-
-        return _missing_method
+from app.utils.exceptions import ValidationException
 
 
 class SecurityService:
@@ -97,15 +81,15 @@ class SecurityService:
         )
 
     def _load_service(self, *, module_name: str, class_name: str, fallback_name: str) -> Any:
-        """Load a concrete security service or return a placeholder adapter."""
+        """Load and instantiate a concrete security service."""
         try:
             module = import_module(f"app.services.security.{module_name}")
-        except ModuleNotFoundError:
-            return _PendingSecurityService(service_name=fallback_name, logger=self.logger)
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(f"Security sub-service module '{module_name}' is unavailable.") from exc
 
         service_class = getattr(module, class_name, None)
         if service_class is None:
-            return _PendingSecurityService(service_name=fallback_name, logger=self.logger)
+            raise RuntimeError(f"Security sub-service class '{class_name}' is unavailable.")
 
         try:
             return service_class(logger=self.logger)
@@ -113,22 +97,14 @@ class SecurityService:
             return service_class()
 
     async def _invoke_subservice(self, *, service: Any, method_names: tuple[str, ...], **payload: Any) -> Any:
-        if service is None or isinstance(service, _PendingSecurityService):
-            return {
-                "success": False,
-                "service": getattr(service, "_service_name", "unknown"),
-                "error": "Security sub-service is unavailable.",
-            }
+        if service is None:
+            raise ValidationException("Security sub-service is unavailable.")
 
         for method_name in method_names:
             method = getattr(service, method_name, None)
             if callable(method):
                 return await method(**payload)
-        return {
-            "success": False,
-            "service": service.__class__.__name__,
-            "error": f"No compatible method found for {method_names}.",
-        }
+        raise ValidationException(f"No compatible method found for {method_names}.")
 
     async def lock_account(self, *, user_id: str | None = None, **payload: Any) -> Any:
         """Delegate account locking to the account lockout service."""

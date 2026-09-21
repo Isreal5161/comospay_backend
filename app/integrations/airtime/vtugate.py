@@ -331,6 +331,9 @@ class VTUGateProvider(VTUProvider):
 	async def fetch_cable_tv_providers(self) -> dict[str, Any]:
 		return await self.fetch_services(service_type="tv")
 
+	async def fetch_cable_tv_bouquets(self, *, provider_code: str) -> dict[str, Any]:
+		raise NotImplementedError("VTUGate cable TV bouquet integration is not implemented yet.")
+
 	async def subscribe_tv(
 		self,
 		*,

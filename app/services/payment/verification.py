@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -11,6 +12,7 @@ from app.models.transaction import Transaction
 from app.models.wallet import Wallet
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.payment.status import normalize_payment_status
 from app.services.provider_service import ProviderService
 from app.utils.exceptions import PaymentException, ValidationException
 
@@ -44,25 +46,33 @@ class PaymentVerificationService:
         if transaction is None:
             raise ValidationException("Payment reference was not found.")
 
-        if transaction.status in {"succeeded", "completed", "settled"}:
+        if normalize_payment_status(transaction.status) == "succeeded":
             return await self._build_response(transaction)
 
-        if transaction.status in {"failed", "cancelled", "refunded"}:
+        if normalize_payment_status(transaction.status) in {"failed", "cancelled", "refunded"}:
             raise PaymentException("The transaction cannot be verified in its current state.")
 
         async with self._transaction_scope():
+            transaction = await self.transaction_repository.get_by_reference_for_update(reference)
+            if transaction is None:
+                raise ValidationException("Payment reference was not found.")
+            if normalize_payment_status(transaction.status) == "succeeded":
+                return await self._build_response(transaction)
+            if normalize_payment_status(transaction.status) in {"failed", "cancelled", "refunded"}:
+                raise PaymentException("The transaction cannot be verified in its current state.")
+
             self.logger.info("payment_verification_started", extra={"reference": reference, "channel": channel})
             response = await self._dispatch_provider(
                 channel=channel,
                 provider_operation=provider_operation,
                 reference=reference,
             )
-            normalized_status = self._normalize_status(response)
+            normalized_status = normalize_payment_status(response.get("status"), default=transaction.status)
             transaction.status = normalized_status
             transaction.provider_name = response.get("provider") or transaction.provider_name
             transaction.provider_reference = response.get("provider_reference") or transaction.provider_reference
             transaction.provider_transaction_id = response.get("provider_transaction_id") or transaction.provider_transaction_id
-            transaction.metadata_payload = self._serialize_metadata({"verification": response})
+            transaction.metadata_payload = self._merge_metadata(transaction.metadata_payload, {"verification": response})
             transaction = await self.transaction_repository.update_transaction(
                 transaction,
                 status=transaction.status,
@@ -72,7 +82,7 @@ class PaymentVerificationService:
                 metadata_payload=transaction.metadata_payload,
             )
 
-            if normalized_status in {"succeeded", "completed", "settled"}:
+            if normalized_status == "succeeded":
                 await self._credit_wallet(transaction)
 
             self.logger.info("payment_verification_completed", extra={"reference": reference, "status": transaction.status})
@@ -128,7 +138,11 @@ class PaymentVerificationService:
         )
 
     async def _credit_wallet(self, transaction: Transaction) -> None:
-        wallet = await self.wallet_repository.get_by_id(transaction.wallet_id) if transaction.wallet_id else None
+        metadata = self._parse_metadata(transaction.metadata_payload)
+        if metadata.get("wallet_credit_applied") is True:
+            return
+
+        wallet = await self.wallet_repository.get_by_id_for_update(transaction.wallet_id) if transaction.wallet_id else None
         if wallet is None:
             raise ValidationException("Wallet was not found for verification crediting.")
         if wallet.available_balance < Decimal("0"):
@@ -137,18 +151,10 @@ class PaymentVerificationService:
         wallet.ledger_balance = wallet.ledger_balance + transaction.amount
         await self.wallet_repository.update_wallet(wallet, available_balance=wallet.available_balance, ledger_balance=wallet.ledger_balance)
 
-    def _normalize_status(self, response: dict[str, Any]) -> str:
-        status = str(response.get("status", "pending")).lower()
-        mapping = {
-            "success": "succeeded",
-            "successful": "succeeded",
-            "completed": "completed",
-            "settled": "settled",
-            "failed": "failed",
-            "error": "failed",
-            "pending": "pending",
-        }
-        return mapping.get(status, status)
+        metadata["wallet_credit_applied"] = True
+        metadata["wallet_credit_source"] = "verification"
+        transaction.metadata_payload = self._serialize_metadata(metadata)
+        await self.transaction_repository.update_transaction(transaction, metadata_payload=transaction.metadata_payload)
 
     def _validate_provider_payload(self, payload: dict[str, Any]) -> None:
         if not payload:
@@ -160,7 +166,7 @@ class PaymentVerificationService:
         else:
             payload = {"value": result}
         return {
-            "status": str(payload.get("status", "pending")).lower(),
+            "status": normalize_payment_status(payload.get("status"), default="pending"),
             "provider": provider.name,
             "provider_reference": payload.get("provider_reference") or payload.get("reference"),
             "provider_transaction_id": payload.get("provider_transaction_id") or payload.get("transaction_id"),
@@ -171,7 +177,27 @@ class PaymentVerificationService:
     def _serialize_metadata(self, payload: dict[str, Any] | None) -> str | None:
         if not payload:
             return None
-        return str(payload)
+        return json.dumps(payload, default=str)
+
+    def _parse_metadata(self, payload: str | None) -> dict[str, Any]:
+        if not payload:
+            return {}
+        try:
+            parsed = json.loads(payload)
+            return parsed if isinstance(parsed, dict) else {"value": parsed}
+        except json.JSONDecodeError:
+            try:
+                import ast
+
+                parsed = ast.literal_eval(payload)
+                return parsed if isinstance(parsed, dict) else {"value": parsed}
+            except Exception:
+                return {"value": payload}
+
+    def _merge_metadata(self, existing: str | None, updates: dict[str, Any]) -> str | None:
+        metadata = self._parse_metadata(existing)
+        metadata.update(updates)
+        return self._serialize_metadata(metadata)
 
     async def _build_response(self, transaction: Transaction) -> dict[str, Any]:
         return {

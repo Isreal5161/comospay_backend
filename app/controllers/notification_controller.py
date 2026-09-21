@@ -4,12 +4,12 @@ import logging
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.schemas.notification_schema import NotificationCreate, NotificationReadSchema
 from app.services.notification_service import NotificationService
-from app.utils.exceptions import AppException
+from app.utils.exceptions import AppException, AuthorizationException
 from app.utils.logger import get_logger, log_api_event
 from app.utils.response import success_response
 
@@ -83,9 +83,21 @@ class NotificationController:
             success_message="Unread notifications retrieved successfully.",
         )
 
-    async def get_notification_detail(self, notification_id: UUID, user_id: UUID | None = None) -> dict[str, Any]:
+    async def get_notification_detail(self, notification_id: UUID, user_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
         """Handle notification detail requests."""
-        target_user_id = user_id or self._resolve_user_id()
+        # IDOR FIX: Verify authenticated user owns the notification
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        target_user_id = user_id or authenticated_user_id
+        
+        # Verify notification ownership
+        notification = await self.notification_service.get_notification_by_id(notification_id)
+        if notification is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+        if notification.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access notification belonging to another user.")
+        
         return await self._execute(
             action="get_notification_detail",
             handler=self.notification_service.get_user_notifications,
@@ -123,9 +135,21 @@ class NotificationController:
             success_message="Notification preferences updated successfully.",
         )
 
-    async def mark_as_read(self, payload: NotificationReadSchema, user_id: UUID | None = None) -> dict[str, Any]:
+    async def mark_as_read(self, payload: NotificationReadSchema, user_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
         """Handle mark-as-read requests."""
-        target_user_id = user_id or self._resolve_user_id()
+        # IDOR FIX: Verify authenticated user owns the notification
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        target_user_id = user_id or authenticated_user_id
+        
+        # Verify notification ownership before marking as read
+        notification = await self.notification_service.get_notification_by_id(payload.notification_id)
+        if notification is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+        if notification.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot modify notification belonging to another user.")
+        
         return await self._execute(
             action="mark_as_read",
             handler=self.notification_service.mark_as_read,
@@ -143,9 +167,21 @@ class NotificationController:
             success_message="All notifications marked as read successfully.",
         )
 
-    async def delete_notification(self, notification_id: UUID, user_id: UUID | None = None) -> dict[str, Any]:
+    async def delete_notification(self, notification_id: UUID, user_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
         """Handle notification deletion requests."""
-        target_user_id = user_id or self._resolve_user_id()
+        # IDOR FIX: Verify authenticated user owns the notification before deletion
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        target_user_id = user_id or authenticated_user_id
+        
+        # Verify notification ownership before deletion
+        notification = await self.notification_service.get_notification_by_id(notification_id)
+        if notification is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+        if notification.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot delete notification belonging to another user.")
+        
         return await self._execute(
             action="delete_notification",
             handler=self.notification_service.delete_notification,
@@ -214,6 +250,26 @@ class NotificationController:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred while processing the request.",
         )
+
+    def _get_authenticated_user_id(self, request: Request | None) -> UUID | None:
+        """Extract authenticated user_id from request context."""
+        if request is None:
+            return None
+        auth_user = getattr(request.state, "auth_user", None)
+        if auth_user is not None:
+            try:
+                return UUID(str(auth_user.user_id)) if auth_user.user_id else None
+            except (ValueError, TypeError):
+                return None
+        auth_payload = getattr(request.state, "auth_payload", None)
+        if isinstance(auth_payload, dict):
+            raw_user_id = auth_payload.get("user_id") or auth_payload.get("sub")
+            if raw_user_id:
+                try:
+                    return UUID(str(raw_user_id))
+                except (ValueError, TypeError):
+                    return None
+        return None
 
     def _resolve_user_id(self) -> UUID:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")

@@ -14,6 +14,7 @@ from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
 from app.services.provider_service import ProviderService
+from app.services.vtu.status import normalize_vtu_status
 from app.services.wallet_service import WalletService
 from app.utils.exceptions import PaymentException, ValidationException, WalletException
 
@@ -160,6 +161,7 @@ class ElectricityPurchaseService:
             transaction_record.external_reference = transaction_record.provider_reference
             transaction_record.metadata_payload = self._serialize_metadata(
                 {
+                    **self._parse_metadata(transaction_record.metadata_payload),
                     "provider_response": provider_response,
                     "meter_number": self._extract_meter_number(transaction_record),
                     "disco": self._extract_disco(transaction_record),
@@ -202,7 +204,12 @@ class ElectricityPurchaseService:
                 return await self._build_response(resolved)
             await self._reverse_wallet_debit(transaction=resolved, reason=reason or "electricity_purchase_reversed")
             resolved.status = "reversed"
-            resolved.metadata_payload = self._serialize_metadata({"reversal_reason": reason or "electricity_purchase_reversed"})
+            resolved.metadata_payload = self._serialize_metadata(
+                {
+                    **self._parse_metadata(resolved.metadata_payload),
+                    "reversal_reason": reason or "electricity_purchase_reversed",
+                }
+            )
             resolved = await self.transaction_repository.update_transaction(resolved, status=resolved.status, metadata_payload=resolved.metadata_payload)
             self.logger.info("electricity_purchase_reversed", extra={"reference": resolved.reference})
             return await self._build_response(resolved)
@@ -284,6 +291,9 @@ class ElectricityPurchaseService:
         return wallet
 
     async def _debit_wallet(self, *, transaction: Transaction, wallet: Wallet, amount: Decimal) -> None:
+        metadata = self._parse_metadata(transaction.metadata_payload)
+        if metadata.get("debit_applied") is True:
+            return
         if wallet.available_balance < amount:
             raise WalletException("Insufficient wallet balance for electricity purchase.")
         wallet.available_balance = wallet.available_balance - amount
@@ -293,7 +303,6 @@ class ElectricityPurchaseService:
             available_balance=wallet.available_balance,
             ledger_balance=wallet.ledger_balance,
         )
-        metadata = self._parse_metadata(transaction.metadata_payload)
         metadata["debit_applied"] = True
         transaction.metadata_payload = self._serialize_metadata(metadata)
         await self.transaction_repository.update_transaction(transaction, metadata_payload=transaction.metadata_payload)
@@ -325,11 +334,18 @@ class ElectricityPurchaseService:
         await self.transaction_repository.update_transaction(transaction, metadata_payload=transaction.metadata_payload)
 
     async def _handle_provider_failure(self, *, transaction: Transaction, reason: str) -> None:
-        self.logger.warning("electricity_purchase_failed", extra={"reference": transaction.reference, "reason": reason})
-        metadata = self._parse_metadata(transaction.metadata_payload)
-        metadata["failure_reason"] = reason
-        transaction.metadata_payload = self._serialize_metadata(metadata)
-        await self.transaction_repository.update_transaction(transaction, status="failed", metadata_payload=transaction.metadata_payload)
+        async with self._transaction_scope():
+            current = await self.transaction_repository.get_by_reference(transaction.reference)
+            if current is None:
+                raise ValidationException("Purchase transaction was not found.")
+            metadata = self._parse_metadata(current.metadata_payload)
+            metadata["failure_reason"] = reason
+            metadata["reversed"] = False
+            if current.status not in {"failed", "cancelled", "reversed"}:
+                current.status = "failed"
+            current.metadata_payload = self._serialize_metadata(metadata)
+            await self.transaction_repository.update_transaction(current, status=current.status, metadata_payload=current.metadata_payload)
+            self.logger.warning("electricity_purchase_failed", extra={"reference": current.reference, "reason": reason})
 
     async def _resolve_transaction(self, *, transaction: Transaction | None, reference: str | None) -> Transaction:
         if transaction is not None:
@@ -361,25 +377,7 @@ class ElectricityPurchaseService:
         return Decimal(str(amount)).quantize(Decimal("0.01"))
 
     def _normalize_status(self, status: str | None) -> str:
-        if not status:
-            return "pending"
-        lowered = str(status).strip().lower()
-        mapping = {
-            "success": "succeeded",
-            "successful": "succeeded",
-            "succeeded": "succeeded",
-            "completed": "completed",
-            "settled": "settled",
-            "failed": "failed",
-            "failure": "failed",
-            "error": "failed",
-            "cancelled": "cancelled",
-            "reversed": "reversed",
-            "pending": "pending",
-            "processing": "pending",
-            "in-progress": "pending",
-        }
-        return mapping.get(lowered, lowered)
+        return normalize_vtu_status(status)
 
     def _normalize_provider_response(self, result: Any, provider: Any) -> dict[str, Any]:
         if isinstance(result, dict):

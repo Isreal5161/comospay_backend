@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
@@ -178,10 +178,11 @@ async def get_tv_controller(tv_service: TVService = Depends(get_tv_service)) -> 
 
 @router.post("/subscribe", status_code=status.HTTP_201_CREATED)
 async def subscribe_tv(
+    request: Request,
     payload: TVSubscriptionRequest,
     controller: TVController = Depends(get_tv_controller),
 ) -> dict[str, Any]:
-    return await controller.purchase_tv(payload)
+    return await controller.purchase_tv(payload, request=request)
 
 
 @router.post("/validate", status_code=status.HTTP_200_OK)
@@ -227,30 +228,34 @@ async def get_providers(
 @router.get("/status/{reference}", status_code=status.HTTP_200_OK)
 async def get_purchase_status(
     reference: str,
+    request: Request,
     controller: TVController = Depends(get_tv_controller),
 ) -> dict[str, Any]:
-    return await controller.get_purchase_status(reference)
+    return await controller.get_purchase_status(reference, request=request)
 
 
 @router.post("/reconcile", status_code=status.HTTP_200_OK)
 async def reconcile_transaction(
     payload: TVReconciliationRequest,
+    request: Request,
     controller: TVController = Depends(get_tv_controller),
 ) -> dict[str, Any]:
-    return await controller.reconcile_transaction(payload)
+    return await controller.reconcile_transaction(payload, request=request)
 
 
 @router.post("/history", status_code=status.HTTP_200_OK)
 async def get_purchase_history(
     payload: TVHistoryRequest,
+    request: Request,
     controller: TVController = Depends(get_tv_controller),
 ) -> dict[str, Any]:
-    return await controller.get_purchase_history(payload)
+    return await controller.get_purchase_history(payload, request=request)
 
 
 @router.get("/details/{reference}", status_code=status.HTTP_200_OK)
 async def get_purchase_details(
     reference: str,
+    request: Request,
     controller: TVController = Depends(get_tv_controller),
 ) -> dict[str, Any]:
-    return await controller.get_purchase_details(reference)
+    return await controller.get_purchase_details(reference, request=request)

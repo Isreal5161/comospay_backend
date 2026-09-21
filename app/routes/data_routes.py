@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
@@ -174,10 +174,11 @@ async def get_data_controller(data_service: DataService = Depends(get_data_servi
 
 @router.post("/purchase", status_code=status.HTTP_201_CREATED)
 async def purchase_data(
+    request: Request,
     payload: DataPurchaseRequest,
     controller: DataController = Depends(get_data_controller),
 ) -> dict[str, Any]:
-    return await controller.purchase_data(payload)
+    return await controller.purchase_data(payload, request=request)
 
 
 @router.get("/plans", status_code=status.HTTP_200_OK)
@@ -207,30 +208,34 @@ async def get_price(
 @router.get("/status/{reference}", status_code=status.HTTP_200_OK)
 async def get_purchase_status(
     reference: str,
+    request: Request,
     controller: DataController = Depends(get_data_controller),
 ) -> dict[str, Any]:
-    return await controller.get_purchase_status(reference)
+    return await controller.get_purchase_status(reference, request=request)
 
 
 @router.post("/reconcile", status_code=status.HTTP_200_OK)
 async def reconcile_transaction(
     payload: DataReconciliationRequest,
+    request: Request,
     controller: DataController = Depends(get_data_controller),
 ) -> dict[str, Any]:
-    return await controller.reconcile_transaction(payload)
+    return await controller.reconcile_transaction(payload, request=request)
 
 
 @router.post("/history", status_code=status.HTTP_200_OK)
 async def get_purchase_history(
     payload: DataHistoryRequest,
+    request: Request,
     controller: DataController = Depends(get_data_controller),
 ) -> dict[str, Any]:
-    return await controller.get_purchase_history(payload)
+    return await controller.get_purchase_history(payload, request=request)
 
 
 @router.get("/details/{reference}", status_code=status.HTTP_200_OK)
 async def get_purchase_details(
     reference: str,
+    request: Request,
     controller: DataController = Depends(get_data_controller),
 ) -> dict[str, Any]:
-    return await controller.get_purchase_details(reference)
+    return await controller.get_purchase_details(reference, request=request)

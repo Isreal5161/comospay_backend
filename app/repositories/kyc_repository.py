@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.kyc import KYC
@@ -43,8 +43,8 @@ class KYCRepository:
             page_size = 20
 
         query = select(KYC).where(KYC.user_id == user_id)
-        count_result = await self.session.execute(query)
-        total = len(count_result.scalars().all())
+        count_result = await self.session.execute(select(func.count(KYC.id)).where(KYC.user_id == user_id))
+        total = int(count_result.scalar_one() or 0)
 
         order_column = getattr(KYC, order_by, KYC.created_at)
         if descending:
@@ -64,8 +64,8 @@ class KYCRepository:
             page_size = 20
 
         query = select(KYC).where(KYC.verification_status == "pending")
-        count_result = await self.session.execute(query)
-        total = len(count_result.scalars().all())
+        count_result = await self.session.execute(select(func.count(KYC.id)).where(KYC.verification_status == "pending"))
+        total = int(count_result.scalar_one() or 0)
 
         result = await self.session.execute(
             query.order_by(KYC.created_at.desc()).offset((page - 1) * page_size).limit(page_size)

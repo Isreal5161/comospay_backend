@@ -15,6 +15,7 @@ from app.integrations.airtime.manager import ProviderManager
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.services.provider_service import ProviderService
+from app.services.vtu.status import normalize_vtu_status
 from app.services.wallet_service import WalletService
 from app.utils.exceptions import PaymentException, ValidationException, WalletException
 
@@ -508,25 +509,7 @@ class DataPurchaseService:
         }
 
     def _normalize_status(self, status: str | None) -> str:
-        if not status:
-            return "pending"
-        lowered = str(status).strip().lower()
-        mapping = {
-            "success": "succeeded",
-            "successful": "succeeded",
-            "succeeded": "succeeded",
-            "completed": "completed",
-            "settled": "settled",
-            "failed": "failed",
-            "failure": "failed",
-            "error": "failed",
-            "cancelled": "cancelled",
-            "reversed": "reversed",
-            "pending": "pending",
-            "processing": "pending",
-            "in-progress": "pending",
-        }
-        return mapping.get(lowered, lowered)
+        return normalize_vtu_status(status)
 
     def _parse_metadata(self, payload: str | None) -> dict[str, Any]:
         if not payload:

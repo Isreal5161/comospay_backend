@@ -36,6 +36,9 @@ class ProviderManager:
             try:
                 result = await provider_operation(**kwargs)
                 return {"provider": provider.name, "data": result}
+            except NotImplementedError:
+                # Skip providers that declare the operation but intentionally do not implement it.
+                continue
             except (ProviderUnavailableError, ProviderTemporaryFailure) as exc:
                 last_error = exc
                 continue

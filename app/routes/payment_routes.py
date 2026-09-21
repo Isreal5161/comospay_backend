@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
@@ -76,63 +76,71 @@ async def get_payment_controller(payment_service: PaymentService = Depends(get_p
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def initialize_payment(
+    request: Request,
     payload: PaymentInitializeRequest,
     controller: PaymentController = Depends(get_payment_controller),
 ) -> dict[str, Any]:
-    return await controller.initialize_payment(payload)
+    return await controller.initialize_payment(payload, request=request)
 
 
 @router.post("/collect", status_code=status.HTTP_201_CREATED)
 async def collect_payment(
+    request: Request,
     payload: PaymentCollectionRequest,
     controller: PaymentController = Depends(get_payment_controller),
 ) -> dict[str, Any]:
-    return await controller.collect_payment(payload)
+    return await controller.collect_payment(payload, request=request)
 
 
 @router.post("/verify", status_code=status.HTTP_200_OK)
 async def verify_payment(
     payload: PaymentVerificationRequest,
+    request: Request,
     controller: PaymentController = Depends(get_payment_controller),
 ) -> dict[str, Any]:
-    return await controller.verify_payment(payload)
+    return await controller.verify_payment(payload, request=request)
 
 
 @router.get("/status/{reference}", status_code=status.HTTP_200_OK)
 async def get_payment_status(
     reference: str,
+    request: Request,
     controller: PaymentController = Depends(get_payment_controller),
 ) -> dict[str, Any]:
-    return await controller.get_payment_status(reference)
+    return await controller.get_payment_status(reference, request=request)
 
 
 @router.post("/reconcile", status_code=status.HTTP_200_OK)
 async def reconcile_payment(
     payload: PaymentReconciliationRequest,
+    request: Request,
     controller: PaymentController = Depends(get_payment_controller),
 ) -> dict[str, Any]:
-    return await controller.reconcile_payment(payload)
+    return await controller.reconcile_payment(payload, request=request)
 
 
 @router.post("/cancel", status_code=status.HTTP_200_OK)
 async def cancel_payment(
     payload: PaymentCancellationRequest,
+    request: Request,
     controller: PaymentController = Depends(get_payment_controller),
 ) -> dict[str, Any]:
-    return await controller.cancel_payment(payload)
+    return await controller.cancel_payment(payload, request=request)
 
 
 @router.get("/history", status_code=status.HTTP_200_OK)
 async def get_payment_history(
     payload: PaymentHistoryRequest,
+    request: Request,
     controller: PaymentController = Depends(get_payment_controller),
 ) -> dict[str, Any]:
-    return await controller.get_payment_history(payload)
+    return await controller.get_payment_history(payload, request=request)
 
 
 @router.get("/history/{reference}", status_code=status.HTTP_200_OK)
 async def get_payment_details(
     reference: str,
+    request: Request,
     controller: PaymentController = Depends(get_payment_controller),
 ) -> dict[str, Any]:
-    return await controller.get_payment_details(reference)
+    return await controller.get_payment_details(reference, request=request)

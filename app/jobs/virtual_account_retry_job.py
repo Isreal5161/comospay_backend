@@ -35,12 +35,16 @@ class VirtualAccountRetryJob:
 
     async def run_once(self) -> None:
         redis_client = None
+        redis_unavailable = False
         try:
             redis_client = await get_redis()
         except Exception as exc:
             self.logger.warning("virtual_account_retry_worker_redis_unavailable", extra={"error": str(exc)})
+            redis_unavailable = True
 
         service = self._build_service(redis_client=redis_client)
+        if redis_unavailable and hasattr(service, "redis_unavailable"):
+            service.redis_unavailable = True
         pending_accounts = await service.get_pending_accounts(limit=self.max_per_batch)
         if not pending_accounts:
             return
@@ -52,15 +56,28 @@ class VirtualAccountRetryJob:
                 self.logger.exception(
                     "virtual_account_retry_account_failed",
                     extra={
-                        "wallet_id": str(getattr(account, "wallet_id", None)),
-                        "virtual_account_id": str(getattr(account, "id", None)),
-                        "provider": getattr(account, "provider", None),
-                        "retry_count": getattr(account, "retry_count", 0),
-                        "status": getattr(account, "status", None),
+                        "wallet_id": self._snapshot_account_value(account, "wallet_id"),
+                        "virtual_account_id": self._snapshot_account_value(account, "id"),
+                        "provider": self._snapshot_account_value(account, "provider"),
+                        "retry_count": self._snapshot_account_value(account, "retry_count", 0),
+                        "status": self._snapshot_account_value(account, "status"),
                         "error": str(exc),
                     },
                 )
                 continue
+
+    def _snapshot_account_value(self, account: Any, attribute_name: str, default: Any = None) -> Any:
+        try:
+            state = getattr(account, "_sa_instance_state", None)
+            if state is not None:
+                state_dict = getattr(state, "dict", None) or {}
+                if attribute_name in state_dict:
+                    return state_dict[attribute_name]
+            if hasattr(account, "__dict__") and attribute_name in account.__dict__:
+                return account.__dict__[attribute_name]
+            return default
+        except Exception:
+            return default
 
     async def run_worker(self) -> None:
         while not self._stopped:
@@ -106,19 +123,37 @@ async def start_background_retry_worker(app) -> None:
         return
 
     async def _worker() -> None:
-        async for session in get_db():
-            job = VirtualAccountRetryJob(
-                session=session,
-                poll_interval=settings.virtual_account_retry_job_interval_seconds,
-                max_per_batch=settings.virtual_account_retry_job_batch_size,
-                max_retries=settings.virtual_account_max_retries,
-            )
-            app.state.virtual_account_retry_job = job
+        # Run repeated iterations where each iteration obtains its own DB session
+        # to avoid holding a long-lived AsyncSession for the lifetime of the worker.
+        try:
+            while True:
+                try:
+                    async for session in get_db():
+                        job = VirtualAccountRetryJob(
+                            session=session,
+                            poll_interval=settings.virtual_account_retry_job_interval_seconds,
+                            max_per_batch=settings.virtual_account_retry_job_batch_size,
+                            max_retries=settings.virtual_account_max_retries,
+                        )
+                        app.state.virtual_account_retry_job = job
+                        try:
+                            # Execute a single iteration (batch) using a fresh session.
+                            await job.run_once()
+                        finally:
+                            # Clear the job reference so shutdown logic can proceed.
+                            app.state.virtual_account_retry_job = None
+                        # end async for -> session context will close here
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    logging.getLogger(__name__).exception("virtual_account_retry_worker_iteration_failed", extra={"error": str(exc)})
+                # Pause between iterations
+                await asyncio.sleep(settings.virtual_account_retry_job_interval_seconds)
+        finally:
             try:
-                await job.run_worker()
-            except asyncio.CancelledError:
-                return
-            return
+                app.state.virtual_account_retry_job = None
+            except Exception:
+                pass
 
     task = asyncio.get_running_loop().create_task(_worker())
     app.state.virtual_account_retry_task = task

@@ -76,7 +76,7 @@ class SessionService:
         if not user_id:
             raise InvalidSessionException(detail="User identifier is required.")
 
-        self._assert_concurrent_session_limit(user_id=user_id)
+        await self._assert_concurrent_session_limit(user_id=user_id)
 
         session_id = self.generate_session_id()
         now = datetime.now(timezone.utc)
@@ -352,21 +352,25 @@ class SessionService:
         if self._is_expired(payload):
             raise SessionExpiredException()
 
-    def _assert_concurrent_session_limit(self, *, user_id: str) -> None:
+    async def _assert_concurrent_session_limit(self, *, user_id: str) -> None:
         """Enforce the configured concurrent-session limit before creating a new session."""
         max_sessions = self._concurrent_session_limit()
         if max_sessions <= 0:
             return
         try:
-            active_count = len(self._active_session_ids(user_id))
+            active_count = len(await self._active_session_ids(user_id))
         except Exception:
             active_count = 0
         if active_count >= max_sessions:
             raise ConcurrentSessionLimitExceededException()
 
-    def _active_session_ids(self, user_id: str) -> list[str]:
-        """Return active session identifiers for a user without requiring Redis access."""
-        return []
+    async def _active_session_ids(self, user_id: str) -> list[str]:
+        """Return active session identifiers for a user."""
+        redis_client = await self._get_redis_client()
+        if redis_client is None:
+            return []
+        session_ids = await redis_client.smembers(self._active_session_index_key(user_id))
+        return [str(session_id) for session_id in session_ids if session_id]
 
     def _session_key(self, session_id: str) -> str:
         """Build a Redis key for a session payload."""

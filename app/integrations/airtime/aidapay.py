@@ -73,6 +73,7 @@ class AidaPayProvider(VTUProvider):
 		amount: float | int,
 		reference: str | None = None,
 	) -> dict[str, Any]:
+		self._require_account_pin()
 		provider_code = await self._resolve_provider_code(service_slug="airtime-topup", value=network)
 		return await self._buy(
 			recipient=phone_number,
@@ -89,6 +90,7 @@ class AidaPayProvider(VTUProvider):
 		bundle_code: str,
 		reference: str | None = None,
 	) -> dict[str, Any]:
+		self._require_account_pin()
 		provider_code = await self._resolve_provider_code(service_slug="data-bundle-sme", value=network)
 		return await self._buy(
 			recipient=phone_number,
@@ -105,6 +107,7 @@ class AidaPayProvider(VTUProvider):
 		amount: float | int,
 		reference: str | None = None,
 	) -> dict[str, Any]:
+		self._require_account_pin()
 		provider_code = await self._resolve_provider_code(service_slug="meter-token", value=provider)
 		return await self._buy(
 			recipient=meter_number,
@@ -166,13 +169,13 @@ class AidaPayProvider(VTUProvider):
 		return await self._request("GET", f"/packages/{quote(normalized, safe='')}")
 
 	async def verify_electricity(self, *, meter_number: str, provider: str) -> dict[str, Any]:
-		raise NotImplementedError("AidaPay electricity verification is not implemented yet.")
+		raise ProviderUnavailableError("AidaPay does not support electricity verification.")
 
 	async def verify_cable_tv(self, *, smart_card_number: str, provider_code: str, phone: str) -> dict[str, Any]:
-		raise NotImplementedError("AidaPay cable TV verification is not implemented yet.")
+		raise ProviderUnavailableError("AidaPay does not support cable TV verification.")
 
 	async def get_education_price(self, *, service_id: str | int) -> dict[str, Any]:
-		raise NotImplementedError("AidaPay education pricing is not implemented yet.")
+		raise ProviderUnavailableError("AidaPay does not support education pricing.")
 
 	async def buy_education_pins(
 		self,
@@ -182,7 +185,7 @@ class AidaPayProvider(VTUProvider):
 		quantity: int,
 		product_code: str,
 	) -> dict[str, Any]:
-		raise NotImplementedError("AidaPay education pin purchase is not implemented yet.")
+		raise ProviderUnavailableError("AidaPay does not support education pin purchase.")
 
 	def _resolve_timeout(self) -> float:
 		connect_timeout = getattr(settings, "connection_timeout", 10)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
@@ -109,88 +109,99 @@ async def get_wallet_controller(wallet_service: WalletService = Depends(get_wall
 
 @router.get("", status_code=status.HTTP_200_OK)
 async def get_wallet(
+    request: Request,
     payload: WalletInfoRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.get_wallet(payload)
+    return await controller.get_wallet(payload, request=request)
 
 
 @router.get("/balance", status_code=status.HTTP_200_OK)
 async def get_wallet_balance(
+    request: Request,
     payload: WalletBalanceRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.get_wallet_balance(payload)
+    return await controller.get_wallet_balance(payload, request=request)
 
 
 @router.get("/statement", status_code=status.HTTP_200_OK)
 async def get_wallet_statement(
+    request: Request,
     payload: WalletStatementRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.get_wallet_statement(payload)
+    return await controller.get_wallet_statement(payload, request=request)
 
 
 @router.post("/fund", status_code=status.HTTP_200_OK)
 async def fund_wallet(
+    request: Request,
     payload: WalletFundingRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.fund_wallet(payload)
+    return await controller.fund_wallet(payload, request=request)
 
 
 @router.post("/transfer", status_code=status.HTTP_200_OK)
 async def transfer(
+    request: Request,
     payload: WalletTransferRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.transfer(payload)
+    return await controller.transfer(payload, request=request)
 
 
 @router.post("/pin", status_code=status.HTTP_201_CREATED)
 async def create_transaction_pin(
+    request: Request,
     payload: TransactionPinRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.create_transaction_pin(payload)
+    return await controller.create_transaction_pin(payload, request=request)
 
 
 @router.put("/pin", status_code=status.HTTP_200_OK)
 async def update_transaction_pin(
+    request: Request,
     payload: TransactionPinRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.update_transaction_pin(payload)
+    return await controller.update_transaction_pin(payload, request=request)
 
 
 @router.post("/pin/verify", status_code=status.HTTP_200_OK)
 async def verify_transaction_pin(
+    request: Request,
     payload: TransactionPinVerificationRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.verify_transaction_pin(payload)
+    return await controller.verify_transaction_pin(payload, request=request)
 
 
 @router.post("/pin/reset", status_code=status.HTTP_200_OK)
 async def reset_transaction_pin(
+    request: Request,
     payload: TransactionPinResetRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.reset_transaction_pin(payload)
+    return await controller.reset_transaction_pin(payload, request=request)
 
 
 @router.get("/transactions", status_code=status.HTTP_200_OK)
 async def get_transaction_history(
+    request: Request,
     payload: TransactionHistoryRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.get_transaction_history(payload)
+    return await controller.get_transaction_history(payload, request=request)
 
 
 @router.get("/transactions/{transaction_id}", status_code=status.HTTP_200_OK)
 async def get_transaction_details(
     transaction_id: str,
+    request: Request,
     payload: TransactionDetailRequest,
     controller: WalletController = Depends(get_wallet_controller),
 ) -> dict[str, Any]:
-    return await controller.get_transaction_details(UUID(transaction_id), payload)
+    return await controller.get_transaction_details(UUID(transaction_id), payload, request=request)

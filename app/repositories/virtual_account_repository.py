@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.virtual_account import VirtualAccount
@@ -32,7 +32,11 @@ class VirtualAccountRepository:
 
     async def get_by_id(self, virtual_account_id: UUID) -> VirtualAccount | None:
         """Retrieve a virtual account by primary key."""
-        result = await self.session.execute(select(VirtualAccount).where(VirtualAccount.id == virtual_account_id))
+        result = await self.session.execute(
+            select(VirtualAccount)
+            .execution_options(populate_existing=True)
+            .where(VirtualAccount.id == virtual_account_id)
+        )
         return result.scalar_one_or_none()
 
     async def get_by_wallet_id(self, wallet_id: UUID) -> list[VirtualAccount]:
@@ -177,7 +181,7 @@ class VirtualAccountRepository:
         return accounts, total
 
     async def update(self, virtual_account: VirtualAccount, **fields: Any) -> VirtualAccount:
-        """Update editable virtual account fields in the database."""
+        """Update editable virtual account fields in the database while preserving the session identity."""
         for field, value in fields.items():
             if hasattr(virtual_account, field):
                 setattr(virtual_account, field, value)
@@ -265,6 +269,83 @@ class VirtualAccountRepository:
         result = await self.session.execute(select(func.count(VirtualAccount.id)).where(VirtualAccount.provider == provider))
         return int(result.scalar_one() or 0)
 
+    async def claim_retry_for_processing(
+        self,
+        virtual_account_id: UUID,
+        *,
+        worker_id: str | None = None,
+        lock_ttl_seconds: int,
+    ) -> bool:
+        """Atomically claim a retryable virtual account for processing with a temporary DB reservation."""
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        claim_until = now + timedelta(seconds=lock_ttl_seconds)
+        result = await self.session.execute(
+            update(VirtualAccount)
+            .where(
+                VirtualAccount.id == virtual_account_id,
+                or_(
+                    and_(
+                        VirtualAccount.status == "PENDING",
+                        or_(VirtualAccount.next_retry_at.is_(None), VirtualAccount.next_retry_at <= now),
+                    ),
+                    and_(
+                        VirtualAccount.status == "PROVISIONING",
+                        or_(
+                            and_(
+                                VirtualAccount.retry_lease_expires_at.isnot(None),
+                                VirtualAccount.retry_lease_expires_at <= now,
+                            ),
+                            VirtualAccount.retry_owner_id.is_(None),
+                        ),
+                    ),
+                ),
+            )
+            .values(
+                status="PROVISIONING",
+                retry_owner_id=worker_id,
+                retry_claimed_at=now,
+                retry_lease_expires_at=claim_until,
+                next_retry_at=claim_until,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        success = bool(result.rowcount)
+        await self.session.commit()
+
+        # After a successful claim, manually update the cached object's attributes so that
+        # subsequent get() calls return the updated object with fresh values, while keeping
+        # it attached to the session so refresh() continues to work.
+        if success:
+            try:
+                obj = await self.session.get(VirtualAccount, virtual_account_id)
+                if obj is not None:
+                    obj.status = "PROVISIONING"
+                    obj.retry_owner_id = worker_id
+                    obj.retry_claimed_at = now
+                    obj.retry_lease_expires_at = claim_until
+                    obj.next_retry_at = claim_until
+            except Exception:
+                pass
+
+        return success
+
+    async def verify_retry_lease(self, virtual_account_id: UUID, worker_id: str) -> bool:
+        """Return whether the provided worker still owns the current retry lease."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        result = await self.session.execute(
+            select(VirtualAccount.id).where(
+                VirtualAccount.id == virtual_account_id,
+                VirtualAccount.retry_owner_id == worker_id,
+                VirtualAccount.retry_lease_expires_at.is_not(None),
+                VirtualAccount.retry_lease_expires_at > now,
+            )
+        )
+        return result.scalar_one_or_none() is not None
+
     async def list_retryable_accounts(self, *, limit: int = 100) -> list[VirtualAccount]:
         """List virtual accounts that are scheduled for retry now or overdue.
 
@@ -273,7 +354,7 @@ class VirtualAccountRepository:
         - next_retry_at is null or <= now
         - retry_count is below a caller-managed max (caller filters later if needed)
         """
-        from sqlalchemy import or_, and_
+        from sqlalchemy import and_
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)

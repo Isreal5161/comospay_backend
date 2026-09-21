@@ -13,6 +13,7 @@ from app.models.wallet import Wallet
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.payment.status import normalize_payment_status
 from app.services.provider_service import ProviderService
 from app.utils.exceptions import PaymentException, ValidationException
 
@@ -112,7 +113,7 @@ class PaymentManager:
             transaction.provider_transaction_id = provider_response.get("provider_transaction_id")
             transaction.external_reference = provider_response.get("provider_reference")
             transaction.metadata_payload = self._serialize_metadata(provider_response)
-            transaction.status = provider_response.get("status", "pending")
+            transaction.status = normalize_payment_status(provider_response.get("status"), default="pending")
             transaction = await self.transaction_repository.update_transaction(
                 transaction,
                 provider_name=transaction.provider_name,
@@ -141,7 +142,7 @@ class PaymentManager:
         if transaction is None:
             raise ValidationException("Payment reference was not found.")
 
-        if transaction.status in {"succeeded", "completed", "settled"}:
+        if normalize_payment_status(transaction.status) == "succeeded":
             return await self._build_transaction_response(transaction)
 
         if provider_operation is None:
@@ -155,7 +156,7 @@ class PaymentManager:
                 normalize=self._normalize_provider_response,
                 payload={"reference": reference},
             )
-            new_status = provider_response.get("status", transaction.status)
+            new_status = normalize_payment_status(provider_response.get("status"), default=transaction.status)
             transaction.status = new_status
             transaction.provider_reference = provider_response.get("provider_reference") or transaction.provider_reference
             transaction.provider_transaction_id = provider_response.get("provider_transaction_id") or transaction.provider_transaction_id
@@ -168,7 +169,7 @@ class PaymentManager:
                 metadata_payload=transaction.metadata_payload,
             )
 
-            if transaction.status in {"succeeded", "completed", "settled"}:
+            if transaction.status == "succeeded":
                 await self.process_successful_payment(transaction=transaction)
 
             self.logger.info("payment_verification_completed", extra={"reference": reference, "status": transaction.status})
@@ -177,9 +178,9 @@ class PaymentManager:
     async def process_successful_payment(self, *, transaction: Transaction | None = None, reference: str | None = None) -> dict[str, Any]:
         """Credit the wallet once for a successful payment and prevent double-crediting."""
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
-        if resolved.status in {"succeeded", "completed", "settled"}:
+        if normalize_payment_status(resolved.status) == "succeeded":
             return await self._build_transaction_response(resolved)
-        if resolved.status in {"failed", "cancelled", "refunded"}:
+        if normalize_payment_status(resolved.status) in {"failed", "cancelled", "refunded"}:
             raise PaymentException("The transaction cannot be completed in its current state.")
 
         wallet = await self._resolve_wallet(user_id=resolved.user_id, wallet_id=resolved.wallet_id)
@@ -201,7 +202,7 @@ class PaymentManager:
     async def process_failed_payment(self, *, transaction: Transaction | None = None, reference: str | None = None, reason: str | None = None) -> dict[str, Any]:
         """Mark a payment as failed without crediting the wallet."""
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
-        if resolved.status in {"failed", "cancelled", "refunded"}:
+        if normalize_payment_status(resolved.status) in {"failed", "cancelled", "refunded"}:
             return await self._build_transaction_response(resolved)
 
         async with self._transaction_scope():
@@ -214,7 +215,7 @@ class PaymentManager:
     async def cancel_payment(self, *, transaction: Transaction | None = None, reference: str | None = None, reason: str | None = None) -> dict[str, Any]:
         """Cancel a pending payment when the user or provider aborts the flow."""
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
-        if resolved.status in {"cancelled", "failed", "succeeded", "completed", "settled"}:
+        if normalize_payment_status(resolved.status) in {"cancelled", "failed", "succeeded"}:
             return await self._build_transaction_response(resolved)
 
         async with self._transaction_scope():
@@ -229,7 +230,7 @@ class PaymentManager:
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
         if resolved.status in {"refunded"}:
             return await self._build_transaction_response(resolved)
-        if resolved.status not in {"succeeded", "completed", "settled"}:
+        if normalize_payment_status(resolved.status) != "succeeded":
             raise PaymentException("Only successful payments can be refunded.")
 
         wallet = await self._resolve_wallet(user_id=resolved.user_id, wallet_id=resolved.wallet_id)
@@ -249,7 +250,7 @@ class PaymentManager:
         """Reconcile the payment state with the latest provider status."""
         resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
         async with self._transaction_scope():
-            resolved.status = provider_status or resolved.status
+            resolved.status = normalize_payment_status(provider_status, default=resolved.status)
             resolved.metadata_payload = self._serialize_metadata({"reconciled": True, "provider_status": provider_status})
             resolved = await self.transaction_repository.update_transaction(resolved, status=resolved.status, metadata_payload=resolved.metadata_payload)
             self.logger.info("payment_reconciliation_completed", extra={"reference": resolved.reference, "status": resolved.status})
@@ -332,7 +333,7 @@ class PaymentManager:
         authorization_url = self._extract_url(flattened_payload, "authorization_url")
 
         normalized = {
-            "status": str(payload.get("status", "pending")).lower(),
+            "status": normalize_payment_status(payload.get("status"), default="pending"),
             "provider": provider.name,
             "provider_reference": payload.get("provider_reference") or payload.get("reference") or nested_payload.get("tx_ref") or payload.get("tx_ref"),
             "provider_transaction_id": payload.get("provider_transaction_id") or payload.get("transaction_id") or nested_payload.get("id"),

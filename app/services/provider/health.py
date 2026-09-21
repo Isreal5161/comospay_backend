@@ -140,6 +140,29 @@ class ProviderHealthService:
         await self._cache_metrics(provider)
         return {"provider_id": str(provider.id), "status": provider.status, "healthy": False}
 
+    async def update_provider_state(
+        self,
+        *,
+        provider_id: UUID,
+        is_active: bool | None = None,
+        status: str | None = None,
+        health_status: str | None = None,
+    ) -> Provider:
+        """Persist provider state fields that affect availability and health ownership."""
+        provider = await self._get_provider(provider_id)
+
+        updates: dict[str, Any] = {}
+        if is_active is not None:
+            updates["is_active"] = bool(is_active)
+        if status is not None:
+            updates["status"] = status
+        if health_status is not None:
+            updates["health_status"] = health_status
+        if not updates:
+            return provider
+
+        return await self.provider_repository.update_provider(provider, **updates)
+
     async def _persist_metrics(self, provider: Provider, metrics: dict[str, Any]) -> None:
         provider.metadata_payload = self._serialize_metrics(metrics)
         await self.provider_repository.update_provider(provider, metadata_payload=provider.metadata_payload)

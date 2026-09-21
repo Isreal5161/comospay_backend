@@ -11,7 +11,8 @@ from app.config.settings import settings
 
 
 _pwd_context: Final[CryptContext] = CryptContext(
-    schemes=["bcrypt"],
+    # Prefer Argon2 for new hashes but accept bcrypt for legacy values.
+    schemes=["argon2", "bcrypt"],
     deprecated="auto",
 )
 

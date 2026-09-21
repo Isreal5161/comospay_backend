@@ -274,10 +274,11 @@ class WalletWithdrawalService:
         return None
 
     async def _load_wallet_for_update(self, wallet_id: UUID) -> Wallet | None:
-        if self.session is None:
+        session = self._resolve_session()
+        if session is None:
             return await self.wallet_repository.get_by_id(wallet_id)
         stmt = select(Wallet).where(Wallet.id == wallet_id).with_for_update()
-        result = await self.session.execute(stmt)
+        result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def _dispatch_provider_call(self, method_name: str, **kwargs: Any) -> dict[str, Any]:
@@ -358,10 +359,37 @@ class WalletWithdrawalService:
         if dependency is None:
             raise RuntimeError(f"Required dependency '{name}' is not configured for WalletWithdrawalService.")
 
+    def _resolve_session(self) -> AsyncSession | None:
+        if self.session is not None:
+            return self.session
+        repository_session = getattr(self.transaction_repository, "session", None)
+        if isinstance(repository_session, AsyncSession):
+            return repository_session
+        repository_session = getattr(self.wallet_repository, "session", None)
+        if isinstance(repository_session, AsyncSession):
+            return repository_session
+        return None
+
     def _session_scope(self) -> Any:
-        if self.session is None:
+        session = self._resolve_session()
+        if session is None:
             return _NullSessionContext()
-        return self.session.begin()
+        if session.in_transaction():
+            return _ActiveSessionContext(session)
+        return session.begin()
+
+
+class _ActiveSessionContext:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def __aenter__(self) -> None:
+        if not self.session.in_transaction():
+            raise RuntimeError("Expected an active database transaction.")
+        return None
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        return False
 
 
 class _NullSessionContext:

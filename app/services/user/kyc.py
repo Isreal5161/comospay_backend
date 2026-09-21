@@ -11,6 +11,7 @@ from app.models.kyc import KYC
 from app.models.user import User
 from app.repositories.kyc_repository import KYCRepository
 from app.repositories.user_repository import UserRepository
+from app.services.kyc_helpers import get_active_submission, get_latest_submission, get_user_or_raise
 from app.utils.exceptions import DatabaseException, ProviderException, ValidationException
 
 
@@ -20,6 +21,8 @@ class KYCService:
     supported_document_types = {"bvn", "nin", "passport", "drivers_license", "international_passport"}
     supported_levels = {"basic", "standard", "premium"}
     supported_statuses = {"pending", "reviewing", "approved", "rejected", "expired"}
+    reviewable_statuses = {"pending", "reviewing"}
+    terminal_review_statuses = {"approved", "rejected"}
 
     def __init__(
         self,
@@ -56,9 +59,7 @@ class KYCService:
         self._validate_document_type(document_type)
         self._validate_verification_level(verification_level)
 
-        user = await self.user_repository.get_by_id(user_id)
-        if not user:
-            raise ValidationException("User not found.")
+        user = await get_user_or_raise(user_repository=self.user_repository, user_id=user_id, error_code="USER_NOT_FOUND")
 
         existing_active = await self._get_active_submission(user_id=user_id)
         if existing_active:
@@ -100,9 +101,7 @@ class KYCService:
         self._require_repository(self.user_repository)
         self._require_repository(self.kyc_repository)
 
-        user = await self.user_repository.get_by_id(user_id)
-        if not user:
-            raise ValidationException("User not found.")
+        user = await get_user_or_raise(user_repository=self.user_repository, user_id=user_id, error_code="USER_NOT_FOUND")
 
         kyc = await self._get_latest_submission(user_id=user_id)
         if not kyc:
@@ -120,9 +119,7 @@ class KYCService:
         self._require_repository(self.user_repository)
         self._require_repository(self.kyc_repository)
 
-        user = await self.user_repository.get_by_id(user_id)
-        if not user:
-            raise ValidationException("User not found.")
+        user = await get_user_or_raise(user_repository=self.user_repository, user_id=user_id, error_code="USER_NOT_FOUND")
 
         kyc = await self._get_latest_submission(user_id=user_id)
         if not kyc:
@@ -142,9 +139,7 @@ class KYCService:
         self._require_repository(self.user_repository)
         self._require_repository(self.kyc_repository)
 
-        user = await self.user_repository.get_by_id(user_id)
-        if not user:
-            raise ValidationException("User not found.")
+        user = await get_user_or_raise(user_repository=self.user_repository, user_id=user_id, error_code="USER_NOT_FOUND")
 
         kyc = await self._get_latest_submission(user_id=user_id)
         if not kyc:
@@ -184,9 +179,7 @@ class KYCService:
         self._require_repository(self.user_repository)
         self._require_repository(self.kyc_repository)
 
-        user = await self.user_repository.get_by_id(user_id)
-        if not user:
-            raise ValidationException("User not found.")
+        user = await get_user_or_raise(user_repository=self.user_repository, user_id=user_id, error_code="USER_NOT_FOUND")
 
         existing_active = await self._get_active_submission(user_id=user_id)
         if existing_active:
@@ -209,9 +202,7 @@ class KYCService:
         self._require_repository(self.user_repository)
         self._require_repository(self.kyc_repository)
 
-        user = await self.user_repository.get_by_id(user_id)
-        if not user:
-            raise ValidationException("User not found.")
+        user = await get_user_or_raise(user_repository=self.user_repository, user_id=user_id, error_code="USER_NOT_FOUND")
 
         kyc = await self._get_latest_submission(user_id=user_id)
         if not kyc:
@@ -219,6 +210,50 @@ class KYCService:
         if kyc.verification_status != "approved" or not kyc.is_verified:
             return False
         return self._level_rank(kyc.verification_level) >= self._level_rank(required_level)
+
+    async def review_kyc(
+        self,
+        *,
+        user_id: UUID,
+        action: str,
+        reviewed_by: str | None = None,
+        review_notes: str | None = None,
+        rejection_reason: str | None = None,
+    ) -> KYC:
+        """Apply KYC review transition rules and persist the resulting state."""
+        self._require_repository(self.user_repository)
+        self._require_repository(self.kyc_repository)
+
+        await get_user_or_raise(user_repository=self.user_repository, user_id=user_id, error_code="USER_NOT_FOUND")
+
+        kyc = await self._get_latest_submission(user_id=user_id)
+        if not kyc:
+            raise ValidationException("KYC record not found for user.")
+
+        normalized_action = self._normalize_review_action(action)
+        normalized_review_notes = self._sanitize_optional_text(review_notes)
+        normalized_rejection_reason = self._sanitize_optional_text(rejection_reason)
+        if normalized_action == "rejected" and not normalized_rejection_reason:
+            raise ValidationException("Rejection reason is required when rejecting KYC.")
+
+        self._validate_review_transition(current_status=kyc.verification_status, next_status=normalized_action)
+
+        now = datetime.now(timezone.utc)
+        update_fields = {
+            "reviewed_by": reviewed_by or "system",
+            "reviewed_at": now,
+            "verification_status": normalized_action,
+            "document_verification_status": normalized_action,
+            "compliance_notes": normalized_review_notes,
+            "approved_at": now if normalized_action == "approved" else None,
+            "rejected_at": now if normalized_action == "rejected" else None,
+            "rejection_reason": normalized_rejection_reason if normalized_action == "rejected" else None,
+            "is_verified": normalized_action == "approved",
+            "is_active": normalized_action == "approved",
+        }
+
+        async with self._session_scope():
+            return await self.kyc_repository.update_kyc(kyc, **update_fields)
 
     def _validate_required_fields(self, **values: Any) -> None:
         for field_name, value in values.items():
@@ -253,6 +288,31 @@ class KYCService:
             raise ValidationException("metadata_payload is too long.")
         return sanitized or None
 
+    def _sanitize_optional_text(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValidationException("Review text must be a string.")
+        sanitized = value.strip()
+        return sanitized or None
+
+    def _normalize_review_action(self, action: str) -> str:
+        normalized = (action or "").strip().lower()
+        if normalized in {"approve", "approved"}:
+            return "approved"
+        if normalized in {"reject", "rejected"}:
+            return "rejected"
+        raise ValidationException("Action must be either approve or reject.")
+
+    def _validate_review_transition(self, *, current_status: str, next_status: str) -> None:
+        normalized_current = (current_status or "").strip().lower()
+        if normalized_current in self.terminal_review_statuses:
+            raise ValidationException("KYC has already been finalized.")
+        if normalized_current not in self.reviewable_statuses:
+            raise ValidationException(f"KYC in status '{normalized_current or 'unknown'}' cannot be reviewed.")
+        if next_status not in self.terminal_review_statuses:
+            raise ValidationException("Unsupported KYC review action.")
+
     def _serialize_kyc(self, kyc: KYC) -> dict[str, Any]:
         return {
             "id": str(kyc.id),
@@ -282,16 +342,12 @@ class KYCService:
 
     async def _get_active_submission(self, *, user_id: UUID) -> KYC | None:
         if self.kyc_repository is not None and hasattr(self.kyc_repository, "get_user_kyc"):
-            records, _ = await self.kyc_repository.get_user_kyc(user_id=user_id, page=1, page_size=20)
-            for record in records:
-                if record.is_active and record.verification_status in {"pending", "reviewing"}:
-                    return record
+            return await get_active_submission(kyc_repository=self.kyc_repository, user_id=user_id, page=1, page_size=20)
         return None
 
     async def _get_latest_submission(self, *, user_id: UUID) -> KYC | None:
         if self.kyc_repository is not None and hasattr(self.kyc_repository, "get_user_kyc"):
-            records, _ = await self.kyc_repository.get_user_kyc(user_id=user_id, page=1, page_size=20)
-            return records[0] if records else None
+            return await get_latest_submission(kyc_repository=self.kyc_repository, user_id=user_id, page=1, page_size=20)
         return None
 
     async def _log_event(self, event_name: str, *, user_id: UUID | None = None, metadata: dict[str, Any] | None = None) -> None:

@@ -5,11 +5,11 @@ from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.services.payment_service import PaymentService
-from app.utils.exceptions import AppException
+from app.utils.exceptions import AppException, AuthorizationException
 from app.utils.logger import get_logger, log_api_event
 from app.utils.response import success_response
 
@@ -85,18 +85,52 @@ class PaymentController:
         self._register_routes()
 
     def _register_routes(self) -> None:
-        self.router.post("", status_code=status.HTTP_201_CREATED)(self.initialize_payment)
-        self.router.post("/collect", status_code=status.HTTP_201_CREATED)(self.collect_payment)
-        self.router.post("/verify", status_code=status.HTTP_200_OK)(self.verify_payment)
-        self.router.get("/status/{reference}", status_code=status.HTTP_200_OK)(self.get_payment_status)
-        self.router.post("/reconcile", status_code=status.HTTP_200_OK)(self.reconcile_payment)
-        self.router.post("/cancel", status_code=status.HTTP_200_OK)(self.cancel_payment)
-        self.router.get("/history", status_code=status.HTTP_200_OK)(self.get_payment_history)
-        self.router.get("/history/{reference}", status_code=status.HTTP_200_OK)(self.get_payment_details)
+        self.router.add_api_route("", self._initialize_payment_route, methods=["POST"], status_code=status.HTTP_201_CREATED, response_model=None)
+        self.router.add_api_route("/collect", self._collect_payment_route, methods=["POST"], status_code=status.HTTP_201_CREATED, response_model=None)
+        self.router.add_api_route("/verify", self._verify_payment_route, methods=["POST"], status_code=status.HTTP_200_OK, response_model=None)
+        self.router.add_api_route("/status/{reference}", self._get_payment_status_route, methods=["GET"], status_code=status.HTTP_200_OK, response_model=None)
+        self.router.add_api_route("/reconcile", self._reconcile_payment_route, methods=["POST"], status_code=status.HTTP_200_OK, response_model=None)
+        self.router.add_api_route("/cancel", self._cancel_payment_route, methods=["POST"], status_code=status.HTTP_200_OK, response_model=None)
+        self.router.add_api_route("/history", self._get_payment_history_route, methods=["GET"], status_code=status.HTTP_200_OK, response_model=None)
+        self.router.add_api_route("/history/{reference}", self._get_payment_details_route, methods=["GET"], status_code=status.HTTP_200_OK, response_model=None)
 
-    async def initialize_payment(self, payload: PaymentInitializeRequest, user_id: UUID | None = None) -> dict[str, Any]:
+    async def _initialize_payment_route(self, payload: PaymentInitializeRequest, request: Request) -> dict[str, Any]:
+        return await self.initialize_payment(payload, request=request)
+
+    async def _collect_payment_route(self, payload: PaymentCollectionRequest, request: Request) -> dict[str, Any]:
+        return await self.collect_payment(payload, request=request)
+
+    async def _verify_payment_route(self, payload: PaymentVerificationRequest, request: Request) -> dict[str, Any]:
+        return await self.verify_payment(payload, request=request)
+
+    async def _get_payment_status_route(self, reference: str, request: Request) -> dict[str, Any]:
+        return await self.get_payment_status(reference, request=request)
+
+    async def _reconcile_payment_route(self, payload: PaymentReconciliationRequest, request: Request) -> dict[str, Any]:
+        return await self.reconcile_payment(payload, request=request)
+
+    async def _cancel_payment_route(self, payload: PaymentCancellationRequest, request: Request) -> dict[str, Any]:
+        return await self.cancel_payment(payload, request=request)
+
+    async def _get_payment_history_route(self, payload: PaymentHistoryRequest, request: Request) -> dict[str, Any]:
+        return await self.get_payment_history(payload, request=request)
+
+    async def _get_payment_details_route(self, reference: str, request: Request) -> dict[str, Any]:
+        return await self.get_payment_details(reference, request=request)
+
+    async def initialize_payment(self, payload: PaymentInitializeRequest, request: Request | None = None, user_id: UUID | None = None) -> dict[str, Any]:
         """Handle payment initialization requests."""
-        target_user_id = user_id or payload.user_id or self._resolve_user_id()
+        authenticated_user_id = None
+        if request is not None:
+            authenticated_user_id = self._get_authenticated_user_id(request)
+            if authenticated_user_id is None:
+                raise AuthorizationException("Authentication required.")
+            if payload.user_id is not None and payload.user_id != authenticated_user_id:
+                raise AuthorizationException("Cannot initialize payment for another user.")
+
+        # Resolve target user: explicit param > payload > authenticated context
+        target_user_id = user_id or payload.user_id or authenticated_user_id or self._resolve_user_id()
+
         return await self._execute(
             action="initialize_payment",
             handler=self.payment_service.initialize_payment,
@@ -116,9 +150,19 @@ class PaymentController:
             success_message="Payment initialized successfully.",
         )
 
-    async def collect_payment(self, payload: PaymentCollectionRequest, user_id: UUID | None = None) -> dict[str, Any]:
+    async def collect_payment(self, payload: PaymentCollectionRequest, request: Request | None = None, user_id: UUID | None = None) -> dict[str, Any]:
         """Handle payment collection requests."""
-        target_user_id = user_id or payload.user_id or self._resolve_user_id()
+        authenticated_user_id = None
+        if request is not None:
+            authenticated_user_id = self._get_authenticated_user_id(request)
+            if authenticated_user_id is None:
+                raise AuthorizationException("Authentication required.")
+            if payload.user_id is not None and payload.user_id != authenticated_user_id:
+                raise AuthorizationException("Cannot collect payment for another user.")
+
+        # Resolve target user: explicit param > payload > authenticated context
+        target_user_id = user_id or payload.user_id or authenticated_user_id or self._resolve_user_id()
+
         return await self._execute(
             action="collect_payment",
             handler=self.payment_service.initialize_payment,
@@ -138,8 +182,23 @@ class PaymentController:
             success_message="Payment collection initialized successfully.",
         )
 
-    async def verify_payment(self, payload: PaymentVerificationRequest) -> dict[str, Any]:
+    async def verify_payment(self, payload: PaymentVerificationRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle payment verification requests."""
+        if request is None:
+            return await self._execute(
+                action="verify_payment",
+                handler=self.payment_service.verify_payment,
+                payload={"reference": payload.reference},
+                success_message="Payment verified successfully.",
+            )
+
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.payment_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="verify_payment",
             handler=self.payment_service.verify_payment,
@@ -147,8 +206,23 @@ class PaymentController:
             success_message="Payment verified successfully.",
         )
 
-    async def get_payment_status(self, reference: str) -> dict[str, Any]:
+    async def get_payment_status(self, reference: str, request: Request | None = None) -> dict[str, Any]:
         """Handle payment status requests."""
+        if request is None:
+            return await self._execute(
+                action="get_payment_status",
+                handler=self.payment_service.get_payment_status,
+                payload={"reference": reference},
+                success_message="Payment status retrieved successfully.",
+            )
+
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.payment_service.get_transaction_user_id_by_reference(reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_payment_status",
             handler=self.payment_service.get_payment_status,
@@ -156,8 +230,23 @@ class PaymentController:
             success_message="Payment status retrieved successfully.",
         )
 
-    async def reconcile_payment(self, payload: PaymentReconciliationRequest) -> dict[str, Any]:
+    async def reconcile_payment(self, payload: PaymentReconciliationRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle payment reconciliation requests."""
+        if request is None:
+            return await self._execute(
+                action="reconcile_payment",
+                handler=self.payment_service.reconcile_payment,
+                payload={"reference": payload.reference, "provider_status": payload.provider_status},
+                success_message="Payment reconciliation completed successfully.",
+            )
+
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.payment_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="reconcile_payment",
             handler=self.payment_service.reconcile_payment,
@@ -165,8 +254,23 @@ class PaymentController:
             success_message="Payment reconciliation completed successfully.",
         )
 
-    async def cancel_payment(self, payload: PaymentCancellationRequest) -> dict[str, Any]:
+    async def cancel_payment(self, payload: PaymentCancellationRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle payment cancellation requests."""
+        if request is None:
+            return await self._execute(
+                action="cancel_payment",
+                handler=self.payment_service.cancel_payment,
+                payload={"reference": payload.reference, "reason": payload.reason},
+                success_message="Payment cancelled successfully.",
+            )
+
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.payment_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="cancel_payment",
             handler=self.payment_service.cancel_payment,
@@ -174,8 +278,23 @@ class PaymentController:
             success_message="Payment cancelled successfully.",
         )
 
-    async def get_payment_history(self, payload: PaymentHistoryRequest) -> dict[str, Any]:
+    async def get_payment_history(self, payload: PaymentHistoryRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle payment history requests."""
+        if request is None:
+            return await self._execute(
+                action="get_payment_history",
+                handler=self.payment_service.get_payment_status,
+                payload={"reference": payload.reference},
+                success_message="Payment history retrieved successfully.",
+            )
+
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.payment_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_payment_history",
             handler=self.payment_service.get_payment_status,
@@ -183,8 +302,23 @@ class PaymentController:
             success_message="Payment history retrieved successfully.",
         )
 
-    async def get_payment_details(self, reference: str) -> dict[str, Any]:
+    async def get_payment_details(self, reference: str, request: Request | None = None) -> dict[str, Any]:
         """Handle payment detail requests."""
+        if request is None:
+            return await self._execute(
+                action="get_payment_details",
+                handler=self.payment_service.get_payment_status,
+                payload={"reference": reference},
+                success_message="Payment details retrieved successfully.",
+            )
+
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.payment_service.get_transaction_user_id_by_reference(reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_payment_details",
             handler=self.payment_service.get_payment_status,
@@ -217,6 +351,33 @@ class PaymentController:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred while processing the request.",
         )
+
+    def _get_authenticated_user_id(self, request: Request | None) -> UUID | None:
+        """Extract and validate authenticated user_id from request context."""
+        if request is None:
+            return None
+        
+        # Try to get authenticated user from request.state set by AuthMiddleware
+        auth_user = getattr(request.state, "auth_user", None)
+        if auth_user is not None:
+            try:
+                user_id = getattr(auth_user, "user_id", None)
+                if user_id:
+                    return UUID(str(user_id))
+            except (ValueError, TypeError, AttributeError):
+                pass
+        
+        # Fallback to auth_payload
+        auth_payload = getattr(request.state, "auth_payload", None)
+        if isinstance(auth_payload, dict):
+            raw_user_id = auth_payload.get("user_id") or auth_payload.get("sub")
+            if raw_user_id:
+                try:
+                    return UUID(str(raw_user_id))
+                except (ValueError, TypeError):
+                    pass
+        
+        return None
 
     def _resolve_user_id(self) -> UUID:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")

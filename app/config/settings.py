@@ -56,6 +56,15 @@ class Settings(BaseSettings):
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
     redis_cache_ttl: int = Field(default=300, alias="REDIS_CACHE_TTL")
 
+    # CORS
+    cors_allow_origins: list[str] | str | None = Field(default=["*"], alias="CORS_ALLOW_ORIGINS")
+    cors_allow_methods: list[str] | str | None = Field(default=["*"], alias="CORS_ALLOW_METHODS")
+    cors_allow_headers: list[str] | str | None = Field(default=["*"], alias="CORS_ALLOW_HEADERS")
+
+    # Host and public path configuration
+    trusted_hosts: list[str] | str | None = Field(default=["*"], alias="TRUSTED_HOSTS")
+    public_routes: list[str] | str | None = Field(default=None, alias="PUBLIC_ROUTES")
+
     # Mail
     mail_provider: str = Field(default="smtp", alias="MAIL_PROVIDER")
     smtp_host: str | None = Field(default=None, alias="SMTP_HOST")
@@ -89,6 +98,14 @@ class Settings(BaseSettings):
     clubkonnect_api_key: SecretStr | None = Field(default=None, alias="CLUBKONNECT_API_KEY")
     clubconnect_api_key: SecretStr | None = Field(default=None, alias="CLUBCONNECT_API_KEY")
     clubconnect_base_url: str | None = Field(default=None, alias="CLUBCONNECT_BASE_URL")
+    clubkonnect_user_id: str | None = Field(default=None, alias="CLUBKONNECT_USER_ID")
+    clubconnect_user_id: str | None = Field(default=None, alias="CLUBCONNECT_USER_ID")
+    clubkonnect_callback_url: str | None = Field(default=None, alias="CLUBKONNECT_CALLBACK_URL")
+    clubconnect_callback_url: str | None = Field(default=None, alias="CLUBCONNECT_CALLBACK_URL")
+    clubkonnect_phone_no: str | None = Field(default=None, alias="CLUBKONNECT_PHONE_NO")
+    clubconnect_phone_no: str | None = Field(default=None, alias="CLUBCONNECT_PHONE_NO")
+    clubkonnect_meter_type: str = Field(default="01", alias="CLUBKONNECT_METER_TYPE")
+    clubconnect_meter_type: str = Field(default="01", alias="CLUBCONNECT_METER_TYPE")
     vtugate_api_key: SecretStr | None = Field(default=None, alias="VTUGATE_API_KEY")
     vtugate_base_url: str | None = Field(default=None, alias="VTUGATE_BASE_URL")
 
@@ -104,6 +121,9 @@ class Settings(BaseSettings):
     max_login_attempts: int = Field(default=5, alias="MAX_LOGIN_ATTEMPTS")
     account_lock_duration_minutes: int = Field(default=15, alias="ACCOUNT_LOCK_DURATION_MINUTES")
     pin_length: int = Field(default=4, alias="PIN_LENGTH")
+
+    # Admin configuration
+    admin_allowed_roles: list[str] | None = Field(default=None, alias="ADMIN_ALLOWED_ROLES")
 
     # Provider Timeouts
     connection_timeout: int = Field(default=10, alias="CONNECTION_TIMEOUT")
@@ -173,6 +193,39 @@ class Settings(BaseSettings):
     cross_origin_resource_policy: str = Field(default="same-origin", alias="CROSS_ORIGIN_RESOURCE_POLICY")
     cross_origin_embedder_policy: str = Field(default="require-corp", alias="CROSS_ORIGIN_EMBEDDER_POLICY")
 
+    @staticmethod
+    def _normalize_list(value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return [str(value).strip()] if str(value).strip() else []
+
+    @staticmethod
+    def _secret_value(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, SecretStr):
+            return value.get_secret_value().strip()
+        if isinstance(value, str):
+            return value.strip()
+        return str(value).strip()
+
+    @staticmethod
+    def _uses_default_local_database(value: str) -> bool:
+        normalized = value.strip().lower()
+        local_markers = (
+            "postgresql://postgres:postgres@localhost",
+            "postgresql+psycopg://postgres:postgres@localhost",
+            "postgresql+asyncpg://postgres:postgres@localhost",
+            "postgresql://postgres:postgres@127.0.0.1",
+            "postgresql+psycopg://postgres:postgres@127.0.0.1",
+            "postgresql+asyncpg://postgres:postgres@127.0.0.1",
+        )
+        return any(normalized.startswith(marker) for marker in local_markers)
+
     @field_validator("app_env", mode="before")
     @classmethod
     def validate_app_env(cls, value: object) -> object:
@@ -204,6 +257,51 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Production configuration is incomplete. Missing required environment variables: "
                     + ", ".join(missing)
+                )
+
+            if self._uses_default_local_database(self.database_url):
+                raise ValueError(
+                    "Production configuration is invalid: DATABASE_URL must not use the default local Postgres credentials."
+                )
+
+            algorithm = str(self.jwt_algorithm or "HS256").upper()
+            secret_value = self._secret_value(self.jwt_secret_key)
+            if algorithm == "HS256":
+                if len(secret_value) < 32 or secret_value.lower() in {
+                    "change-me-in-production",
+                    "change-me",
+                    "dev-secret",
+                    "test-secret",
+                    "secret",
+                    "jwt-secret",
+                    "default-secret",
+                }:
+                    raise ValueError(
+                        "Production configuration is invalid: JWT_SECRET_KEY must be explicitly configured and at least 32 characters for HS256."
+                    )
+            elif algorithm == "RS256":
+                pem_markers = (
+                    "-----BEGIN PRIVATE KEY-----",
+                    "-----BEGIN PUBLIC KEY-----",
+                    "-----BEGIN RSA PRIVATE KEY-----",
+                )
+                if not any(marker in secret_value for marker in pem_markers):
+                    raise ValueError(
+                        "Production configuration is invalid: JWT_SECRET_KEY must be a PEM-formatted RSA key when JWT_ALGORITHM=RS256."
+                    )
+            else:
+                raise ValueError(f"Production configuration is invalid: Unsupported JWT_ALGORITHM '{algorithm}'.")
+
+            cors_origins = self._normalize_list(self.cors_allow_origins)
+            if not cors_origins or any(origin == "*" for origin in cors_origins):
+                raise ValueError(
+                    "Production configuration is invalid: CORS allow_origins must be explicitly configured and must not contain wildcard '*'."
+                )
+
+            trusted_hosts = self._normalize_list(self.trusted_hosts)
+            if not trusted_hosts or any(host == "*" for host in trusted_hosts):
+                raise ValueError(
+                    "Production configuration is invalid: trusted_hosts must be explicitly configured and must not contain wildcard '*'."
                 )
 
         return self

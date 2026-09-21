@@ -46,7 +46,7 @@ class WebhookController:
         provider_name = self._extract_header(request, "x-provider-name") or payload.get("provider_name") or "flutterwave"
         signature = self._extract_header(request, "x-webhook-signature") or payload.get("signature")
         timestamp = self._extract_header(request, "x-webhook-timestamp") or payload.get("timestamp")
-        configured_secret = self._resolve_configured_secret()
+        configured_secret = self._resolve_configured_secret(provider_name)
         await self._verify_request_signature(raw_body=raw_body, signature=signature, timestamp=timestamp, secret=configured_secret)
         return await self._execute(
             action="handle_payment_webhook",
@@ -68,7 +68,7 @@ class WebhookController:
         provider_name = self._extract_header(request, "x-provider-name") or payload.get("provider_name") or "flutterwave"
         signature = self._extract_header(request, "x-webhook-signature") or payload.get("signature")
         timestamp = self._extract_header(request, "x-webhook-timestamp") or payload.get("timestamp")
-        configured_secret = self._resolve_configured_secret()
+        configured_secret = self._resolve_configured_secret(provider_name)
         await self._verify_request_signature(raw_body=raw_body, signature=signature, timestamp=timestamp, secret=configured_secret)
         return await self._execute(
             action="handle_virtual_account_webhook",
@@ -90,7 +90,7 @@ class WebhookController:
         provider_name = self._extract_header(request, "x-provider-name") or payload.get("provider_name") or "flutterwave"
         signature = self._extract_header(request, "x-webhook-signature") or payload.get("signature")
         timestamp = self._extract_header(request, "x-webhook-timestamp") or payload.get("timestamp")
-        configured_secret = self._resolve_configured_secret()
+        configured_secret = self._resolve_configured_secret(provider_name)
         await self._verify_request_signature(raw_body=raw_body, signature=signature, timestamp=timestamp, secret=configured_secret)
         return await self._execute(
             action="handle_transfer_webhook",
@@ -108,8 +108,12 @@ class WebhookController:
 
     async def handle_provider_webhook(self, request: Request) -> dict[str, Any]:
         """Handle provider monitoring and health webhooks."""
-        payload = await self._read_payload(request)
+        payload, raw_body = await self._read_payload(request)
         provider_name = self._extract_header(request, "x-provider-name") or payload.get("provider_name") or "provider"
+        signature = self._extract_header(request, "x-webhook-signature") or payload.get("signature")
+        timestamp = self._extract_header(request, "x-webhook-timestamp") or payload.get("timestamp")
+        configured_secret = self._resolve_configured_secret(provider_name)
+        await self._verify_request_signature(raw_body=raw_body, signature=signature, timestamp=timestamp, secret=configured_secret)
         return await self._execute(
             action="handle_provider_webhook",
             handler=self.webhook_service.process_vtu_webhook,
@@ -122,7 +126,12 @@ class WebhookController:
 
     async def handle_notification_webhook(self, request: Request) -> dict[str, Any]:
         """Handle notification provider webhook requests."""
-        payload = await self._read_payload(request)
+        payload, raw_body = await self._read_payload(request)
+        provider_name = self._extract_header(request, "x-provider-name") or payload.get("provider_name") or "flutterwave"
+        signature = self._extract_header(request, "x-webhook-signature") or payload.get("signature")
+        timestamp = self._extract_header(request, "x-webhook-timestamp") or payload.get("timestamp")
+        configured_secret = self._resolve_configured_secret(provider_name)
+        await self._verify_request_signature(raw_body=raw_body, signature=signature, timestamp=timestamp, secret=configured_secret)
         return await self._execute(
             action="handle_notification_webhook",
             handler=self.webhook_service.process_notification_webhook,
@@ -160,7 +169,21 @@ class WebhookController:
     def _extract_header(self, request: Request, header_name: str) -> str | None:
         return request.headers.get(header_name)
 
-    def _resolve_configured_secret(self) -> str | None:
+    def _resolve_configured_secret(self, provider_name: str | None = None) -> str | None:
+        """Resolve a webhook secret for a given provider from settings.
+
+        Looks up a provider-specific setting like `'{provider}_webhook_secret'`.
+        Falls back to `flutterwave_webhook_secret` for compatibility.
+        """
+        provider = (provider_name or "").strip().lower()
+        if provider:
+            candidate_attr = f"{provider}_webhook_secret"
+            configured = getattr(settings, candidate_attr, None)
+            if configured is not None:
+                if hasattr(configured, "get_secret_value"):
+                    return configured.get_secret_value()
+                return str(configured)
+
         configured = getattr(settings, "flutterwave_webhook_secret", None)
         if configured is None:
             return None

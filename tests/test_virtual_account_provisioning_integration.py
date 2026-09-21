@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.config.settings import settings
 from app.database.base import Base
@@ -64,22 +65,18 @@ class FakeRedis:
         return 1
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def test_engine():
-    # Use a shared in-memory SQLite database for all connections during tests
-    # so that the schema created on one connection is visible to others.
     engine = create_async_engine(
-        "sqlite+aiosqlite:///file:memdb1?mode=memory&cache=shared&uri=true",
+        "sqlite+aiosqlite:///:memory:",
         future=True,
         echo=False,
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
     )
 
     async def prepare():
         async with engine.begin() as conn:
-            # Some SQLAlchemy naming conventions can cause duplicate Index
-            # objects to be registered in MetaData when tests import
-            # models multiple ways. Deduplicate indexes by name here so
-            # SQLite doesn't attempt to create the same index twice.
             for table in list(Base.metadata.tables.values()):
                 seen = set()
                 for idx in list(table.indexes):

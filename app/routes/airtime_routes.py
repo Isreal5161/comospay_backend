@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
@@ -163,18 +163,20 @@ async def get_airtime_controller(airtime_service: AirtimeService = Depends(get_a
 
 @router.post("/purchase", status_code=status.HTTP_201_CREATED)
 async def purchase_airtime(
+    request: Request,
     payload: AirtimePurchaseRequest,
     controller: AirtimeController = Depends(get_airtime_controller),
 ) -> dict[str, Any]:
-    return await controller.purchase_airtime(payload)
+    return await controller.purchase_airtime(payload, request=request)
 
 
 @router.post("/validate", status_code=status.HTTP_200_OK)
 async def validate_purchase_request(
+    request: Request,
     payload: AirtimeValidationRequest,
     controller: AirtimeController = Depends(get_airtime_controller),
 ) -> dict[str, Any]:
-    return await controller.validate_purchase_request(payload)
+    return await controller.validate_purchase_request(payload, request=request)
 
 
 @router.post("/price", status_code=status.HTTP_200_OK)
@@ -196,30 +198,34 @@ async def get_pricing_breakdown(
 @router.get("/status/{reference}", status_code=status.HTTP_200_OK)
 async def get_purchase_status(
     reference: str,
+    request: Request,
     controller: AirtimeController = Depends(get_airtime_controller),
 ) -> dict[str, Any]:
-    return await controller.get_purchase_status(reference)
+    return await controller.get_purchase_status(reference, request=request)
 
 
 @router.post("/reconcile", status_code=status.HTTP_200_OK)
 async def reconcile_transaction(
     payload: AirtimeReconciliationRequest,
+    request: Request,
     controller: AirtimeController = Depends(get_airtime_controller),
 ) -> dict[str, Any]:
-    return await controller.reconcile_transaction(payload)
+    return await controller.reconcile_transaction(payload, request=request)
 
 
 @router.post("/history", status_code=status.HTTP_200_OK)
 async def get_purchase_history(
     payload: AirtimeHistoryRequest,
+    request: Request,
     controller: AirtimeController = Depends(get_airtime_controller),
 ) -> dict[str, Any]:
-    return await controller.get_purchase_history(payload)
+    return await controller.get_purchase_history(payload, request=request)
 
 
 @router.get("/details/{reference}", status_code=status.HTTP_200_OK)
 async def get_purchase_details(
     reference: str,
+    request: Request,
     controller: AirtimeController = Depends(get_airtime_controller),
 ) -> dict[str, Any]:
-    return await controller.get_purchase_details(reference)
+    return await controller.get_purchase_details(reference, request=request)

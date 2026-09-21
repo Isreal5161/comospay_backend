@@ -9,7 +9,7 @@ from io import StringIO
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.transaction import Transaction
@@ -213,9 +213,9 @@ class WalletStatementService:
                 result = await self.session.execute(query_stmt.order_by(Transaction.created_at.desc()).offset((page - 1) * page_size).limit(page_size))
                 paged_items = list(result.scalars().all())
                 count_result = await self.session.execute(
-                    select(Transaction.id).where(Transaction.user_id == user_id).where(Transaction.wallet_id == wallet.id)
+                    select(func.count(Transaction.id)).where(Transaction.user_id == user_id).where(Transaction.wallet_id == wallet.id)
                 )
-                total = len(count_result.scalars().all())
+                total = int(count_result.scalar_one() or 0)
 
             return {
                 "wallet_id": str(wallet.id),
@@ -411,8 +411,8 @@ class WalletStatementService:
                     order_column = order_column.desc()
                 result = await self.session.execute(stmt.order_by(order_column).offset((page - 1) * page_size).limit(page_size))
                 paged_items = list(result.scalars().all())
-                count_result = await self.session.execute(select(Transaction.id).where(Transaction.wallet_id == wallet_id))
-                total = len(count_result.scalars().all())
+                count_result = await self.session.execute(select(func.count(Transaction.id)).where(Transaction.wallet_id == wallet_id))
+                total = int(count_result.scalar_one() or 0)
 
             return {
                 "items": paged_items,

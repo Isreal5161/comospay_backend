@@ -75,20 +75,28 @@ class ProviderService:
         )
 
         try:
+            executed_provider: Provider | None = None
+
+            async def tracked_operation(provider: Provider) -> T:
+                nonlocal executed_provider
+                executed_provider = provider
+                return await operation(provider)
+
             result = await self.failover_service.execute_with_failover(
-                operation=operation,
+                operation=tracked_operation,
                 category=category,
                 service_type=service_type,
                 environment=environment,
                 use_cache=use_cache,
                 retryable_errors=retryable_errors,
             )
-            response = normalize(result, provider_record) if normalize is not None else self._default_normalize(provider_record, result, category=category, service_type=service_type)
+            resolved_provider = executed_provider or provider_record
+            response = normalize(result, resolved_provider) if normalize is not None else self._default_normalize(resolved_provider, result, category=category, service_type=service_type)
             elapsed_ms = self._now_ms() - started_at
             self.logger.info(
                 "provider_execution_completed",
                 extra={
-                    "provider": provider_record.name,
+                    "provider": resolved_provider.name,
                     "category": category,
                     "service_type": service_type,
                     "status": "success",

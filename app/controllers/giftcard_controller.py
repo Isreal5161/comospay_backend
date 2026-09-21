@@ -5,11 +5,11 @@ from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.services.giftcard_service import GiftCardService
-from app.utils.exceptions import AppException
+from app.utils.exceptions import AppException, AuthorizationException
 from app.utils.logger import get_logger, log_api_event
 from app.utils.response import success_response
 
@@ -157,8 +157,15 @@ class GiftCardController:
             success_message="Gift card valuation retrieved successfully.",
         )
 
-    async def trade_giftcard(self, payload: GiftCardTradeRequest) -> dict[str, Any]:
+    async def trade_giftcard(self, payload: GiftCardTradeRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle gift card trading requests."""
+        # IDOR FIX: Validate authenticated user matches the user making the trade
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot trade giftcard for another user.")
+        
         return await self._execute(
             action="trade_giftcard",
             handler=self.giftcard_service.buy_giftcard,
@@ -232,8 +239,16 @@ class GiftCardController:
             success_message="Gift card settlement completed successfully.",
         )
 
-    async def reconcile_transaction(self, payload: GiftCardReconciliationRequest) -> dict[str, Any]:
+    async def reconcile_transaction(self, payload: GiftCardReconciliationRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle gift card reconciliation requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.giftcard_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="reconcile_transaction",
             handler=self.giftcard_service.reconcile_transaction,
@@ -275,8 +290,15 @@ class GiftCardController:
             success_message="Supported countries and currencies retrieved successfully.",
         )
 
-    async def get_trade_status(self, reference: str) -> dict[str, Any]:
+    async def get_trade_status(self, reference: str, request: Request | None = None) -> dict[str, Any]:
         """Handle gift card transaction status requests."""
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.giftcard_service.get_transaction_user_id_by_reference(reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+
         return await self._execute(
             action="get_trade_status",
             handler=self.giftcard_service.get_trade_status,
@@ -284,8 +306,15 @@ class GiftCardController:
             success_message="Gift card transaction status retrieved successfully.",
         )
 
-    async def get_trade_history(self, payload: GiftCardHistoryRequest) -> dict[str, Any]:
+    async def get_trade_history(self, payload: GiftCardHistoryRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle gift card transaction history requests."""
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.giftcard_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+
         return await self._execute(
             action="get_trade_history",
             handler=self.giftcard_service.get_trade_status,
@@ -293,14 +322,43 @@ class GiftCardController:
             success_message="Gift card transaction history retrieved successfully.",
         )
 
-    async def get_trade_details(self, reference: str) -> dict[str, Any]:
+    async def get_trade_details(self, reference: str, request: Request | None = None) -> dict[str, Any]:
         """Handle gift card transaction detail requests."""
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.giftcard_service.get_transaction_user_id_by_reference(reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+
         return await self._execute(
             action="get_trade_details",
             handler=self.giftcard_service.get_trade_details,
             payload={"reference": reference},
             success_message="Gift card transaction details retrieved successfully.",
         )
+
+    def _get_authenticated_user_id(self, request: Request | None) -> UUID | None:
+        """Extract and validate authenticated user_id from request context."""
+        if request is None:
+            return None
+        auth_user = getattr(request.state, "auth_user", None)
+        if auth_user is not None:
+            try:
+                user_id = getattr(auth_user, "user_id", None)
+                if user_id:
+                    return UUID(str(user_id))
+            except (ValueError, TypeError, AttributeError):
+                pass
+        auth_payload = getattr(request.state, "auth_payload", None)
+        if isinstance(auth_payload, dict):
+            raw_user_id = auth_payload.get("user_id") or auth_payload.get("sub")
+            if raw_user_id:
+                try:
+                    return UUID(str(raw_user_id))
+                except (ValueError, TypeError):
+                    pass
+        return None
 
     async def _execute(
         self,

@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.system_settings import SystemSettings
 
 
+_UNSET = object()
+
+
 class SystemSettingsRepository:
     """Repository for database access to system setting records."""
 
@@ -71,19 +74,18 @@ class SystemSettingsRepository:
         self,
         setting_id: UUID,
         *,
-        value: Any = object(),
-        description: Any = object(),
-        is_active: Any = object(),
+        value: Any = _UNSET,
+        description: Any = _UNSET,
+        is_active: Any = _UNSET,
     ) -> SystemSettings | None:
         """Update permitted system setting fields in the database."""
-        sentinel = object()
         update_values: dict[str, Any] = {}
 
-        if value is not sentinel:
+        if value is not _UNSET:
             update_values["value"] = value
-        if description is not sentinel:
+        if description is not _UNSET:
             update_values["description"] = description
-        if is_active is not sentinel:
+        if is_active is not _UNSET:
             update_values["is_active"] = is_active
 
         if not update_values:

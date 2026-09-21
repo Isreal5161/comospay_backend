@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.api_key import APIKey
@@ -52,8 +52,8 @@ class APIKeyRepository:
         if descending:
             order_column = order_column.desc()
 
-        count_result = await self.session.execute(select(APIKey).where(APIKey.owner_id == owner_id))
-        total = len(count_result.scalars().all())
+        count_result = await self.session.execute(select(func.count(APIKey.id)).where(APIKey.owner_id == owner_id))
+        total = int(count_result.scalar_one() or 0)
 
         result = await self.session.execute(
             select(APIKey)

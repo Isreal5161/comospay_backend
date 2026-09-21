@@ -5,11 +5,11 @@ from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.services.wallet_service import WalletService
-from app.utils.exceptions import AppException
+from app.utils.exceptions import AppException, AuthorizationException
 from app.utils.logger import get_logger, log_api_event
 from app.utils.response import success_response
 
@@ -127,8 +127,17 @@ class WalletController:
         self.router.get("/transactions", status_code=status.HTTP_200_OK)(self.get_transaction_history)
         self.router.get("/transactions/{transaction_id}", status_code=status.HTTP_200_OK)(self.get_transaction_details)
 
-    async def get_wallet(self, payload: WalletInfoRequest) -> dict[str, Any]:
+    async def get_wallet(self, payload: WalletInfoRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle wallet information retrieval requests."""
+        # IDOR FIX: Validate authenticated user owns the wallet being accessed
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        # Query wallet to verify ownership before proceeding
+        wallet = await self.wallet_service.get_wallet(wallet_id=payload.wallet_id)
+        if wallet and wallet.get("user_id") and UUID(str(wallet["user_id"])) != authenticated_user_id:
+            raise AuthorizationException("You do not have access to this wallet.")
+        
         return await self._execute(
             action="get_wallet",
             handler=self.wallet_service.get_wallet,
@@ -136,8 +145,17 @@ class WalletController:
             success_message="Wallet retrieved successfully.",
         )
 
-    async def get_wallet_balance(self, payload: WalletBalanceRequest) -> dict[str, Any]:
+    async def get_wallet_balance(self, payload: WalletBalanceRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle wallet balance retrieval requests."""
+        # IDOR FIX: Validate authenticated user owns the wallet being accessed
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        # Query wallet to verify ownership before proceeding
+        wallet = await self.wallet_service.get_wallet(wallet_id=payload.wallet_id)
+        if wallet and wallet.get("user_id") and UUID(str(wallet["user_id"])) != authenticated_user_id:
+            raise AuthorizationException("You do not have access to this wallet.")
+        
         return await self._execute(
             action="get_wallet_balance",
             handler=self.wallet_service.get_wallet_balance,
@@ -145,8 +163,15 @@ class WalletController:
             success_message="Wallet balance retrieved successfully.",
         )
 
-    async def get_wallet_statement(self, payload: WalletStatementRequest) -> dict[str, Any]:
+    async def get_wallet_statement(self, payload: WalletStatementRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle wallet statement retrieval requests."""
+        # IDOR FIX: Validate authenticated user matches the user in the request
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot retrieve statement for another user's wallet.")
+
         return await self._execute(
             action="get_wallet_statement",
             handler=self.wallet_service.get_wallet_statement,
@@ -163,8 +188,15 @@ class WalletController:
             success_message="Wallet statement retrieved successfully.",
         )
 
-    async def fund_wallet(self, payload: WalletFundingRequest) -> dict[str, Any]:
+    async def fund_wallet(self, payload: WalletFundingRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle wallet funding requests."""
+        # IDOR FIX: Validate authenticated user matches the user requesting the funding
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot fund wallet for another user.")
+
         return await self._execute(
             action="fund_wallet",
             handler=self.wallet_service.initialize_wallet_funding,
@@ -180,8 +212,15 @@ class WalletController:
             success_message="Wallet funding request initiated successfully.",
         )
 
-    async def transfer(self, payload: WalletTransferRequest) -> dict[str, Any]:
+    async def transfer(self, payload: WalletTransferRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle wallet transfer requests."""
+        # IDOR FIX: Validate authenticated user is the sender (not the recipient)
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.sender_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot transfer from another user's wallet.")
+
         return await self._execute(
             action="transfer",
             handler=self.wallet_service.transfer_between_users,
@@ -198,8 +237,15 @@ class WalletController:
             success_message="Wallet transfer completed successfully.",
         )
 
-    async def create_transaction_pin(self, payload: TransactionPinRequest) -> dict[str, Any]:
+    async def create_transaction_pin(self, payload: TransactionPinRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle transfer PIN creation requests."""
+        # IDOR FIX: Validate authenticated user matches the user managing the PIN
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot manage PIN for another user.")
+
         return await self._execute(
             action="create_transaction_pin",
             handler=self.wallet_service.create_transaction_pin,
@@ -212,8 +258,15 @@ class WalletController:
             success_message="Transaction PIN created successfully.",
         )
 
-    async def update_transaction_pin(self, payload: TransactionPinRequest) -> dict[str, Any]:
+    async def update_transaction_pin(self, payload: TransactionPinRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle transfer PIN update requests."""
+        # IDOR FIX: Validate authenticated user matches the user managing the PIN
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot manage PIN for another user.")
+
         return await self._execute(
             action="update_transaction_pin",
             handler=self.wallet_service.change_transaction_pin,
@@ -227,16 +280,30 @@ class WalletController:
             success_message="Transaction PIN updated successfully.",
         )
 
-    async def verify_transaction_pin(self, payload: TransactionPinVerificationRequest) -> dict[str, Any]:
+    async def verify_transaction_pin(self, payload: TransactionPinVerificationRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle transfer PIN verification requests."""
+        # IDOR FIX: Validate authenticated user matches the user verifying the PIN
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot verify PIN for another user.")
+
         result = await self.wallet_service.verify_transaction_pin(user_id=payload.user_id, pin=payload.pin)
         return success_response(
             data={"verified": result},
             message="Transaction PIN verified successfully.",
         )
 
-    async def reset_transaction_pin(self, payload: TransactionPinResetRequest) -> dict[str, Any]:
+    async def reset_transaction_pin(self, payload: TransactionPinResetRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle transfer PIN reset requests."""
+        # IDOR FIX: Validate authenticated user matches the user resetting the PIN
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot reset PIN for another user.")
+
         return await self._execute(
             action="reset_transaction_pin",
             handler=self.wallet_service.reset_transaction_pin,
@@ -249,8 +316,15 @@ class WalletController:
             success_message="Transaction PIN reset successfully.",
         )
 
-    async def get_transaction_history(self, payload: TransactionHistoryRequest) -> dict[str, Any]:
+    async def get_transaction_history(self, payload: TransactionHistoryRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle transaction history retrieval requests."""
+        # IDOR FIX: Validate authenticated user matches the user requesting the history
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot retrieve transaction history for another user.")
+
         return await self._execute(
             action="get_transaction_history",
             handler=self.wallet_service.get_transaction_history,
@@ -263,8 +337,15 @@ class WalletController:
             success_message="Transaction history retrieved successfully.",
         )
 
-    async def get_transaction_details(self, transaction_id: UUID, payload: TransactionDetailRequest) -> dict[str, Any]:
+    async def get_transaction_details(self, transaction_id: UUID, payload: TransactionDetailRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle transaction detail retrieval requests."""
+        # IDOR FIX: Validate authenticated user matches the user requesting the details
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot retrieve transaction details for another user.")
+
         return await self._execute(
             action="get_transaction_details",
             handler=self.wallet_service.get_transaction_details,
@@ -286,6 +367,33 @@ class WalletController:
 
         log_api_event(self.logger, "wallet_request_succeeded", action=action)
         return success_response(data=result, message=success_message)
+
+    def _get_authenticated_user_id(self, request: Request | None) -> UUID | None:
+        """Extract and validate authenticated user_id from request context."""
+        if request is None:
+            return None
+        
+        # Try to get authenticated user from request.state set by AuthMiddleware
+        auth_user = getattr(request.state, "auth_user", None)
+        if auth_user is not None:
+            try:
+                user_id = getattr(auth_user, "user_id", None)
+                if user_id:
+                    return UUID(str(user_id))
+            except (ValueError, TypeError, AttributeError):
+                pass
+        
+        # Fallback to auth_payload
+        auth_payload = getattr(request.state, "auth_payload", None)
+        if isinstance(auth_payload, dict):
+            raw_user_id = auth_payload.get("user_id") or auth_payload.get("sub")
+            if raw_user_id:
+                try:
+                    return UUID(str(raw_user_id))
+                except (ValueError, TypeError):
+                    pass
+        
+        return None
 
     def _handle_exception(self, exc: Exception, action: str) -> HTTPException:
         log_api_event(self.logger, "wallet_request_failed", action=action, error=str(exc))

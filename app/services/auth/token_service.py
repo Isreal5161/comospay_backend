@@ -26,8 +26,10 @@ class TokenService:
     by the higher-level authentication service layer.
     """
 
-    _REVOCATION_PREFIX = "jwt:revoked"
+    REVOCATION_PREFIX = "jwt:revoked"
+    _REVOCATION_PREFIX = REVOCATION_PREFIX
     _FAMILY_PREFIX = "jwt:family"
+    _ROTATION_LOCK_PREFIX = "jwt:rotate_lock"
 
     def __init__(
         self,
@@ -221,30 +223,41 @@ class TokenService:
     ) -> dict[str, Any]:
         """Rotate a refresh token by revoking the old token and issuing a new one."""
         claims = self.validate_token(refresh_token, expected_type="refresh")
-        if await self.check_revoked_token(token=refresh_token):
-            raise AuthenticationException(detail="Refresh token has been revoked.", error_code="TOKEN_REVOKED")
-
-        new_family_id = family_id or str(claims.get("family_id") or claims.get("token_family_id") or self.generate_token_family_id())
-        new_token = self.create_refresh_token(
-            subject=subject or str(claims.get("sub") or ""),
-            device_id=device_id or claims.get("device_id"),
-            session_id=session_id or claims.get("session_id"),
-            family_id=new_family_id,
-        )
-        await self.revoke_token(refresh_token, reason="rotated")
-
         redis_client = await self._get_redis_client()
-        if redis_client is not None:
-            family_key = self._family_key(new_family_id)
-            await redis_client.sadd(family_key, str(claims.get("jti") or ""), str(self.extract_claims(new_token).get("jti") or ""))
-            await redis_client.expire(family_key, max(self._calculate_ttl_seconds(claims), 60))
+        lock_key = self._rotation_lock_key(str(claims.get("jti") or ""))
+        lock_acquired = False
+        try:
+            if redis_client is not None and lock_key:
+                lock_acquired = bool(await redis_client.set(lock_key, "1", ex=30, nx=True))
+                if not lock_acquired:
+                    raise AuthenticationException(detail="Refresh token has been revoked.", error_code="TOKEN_REVOKED")
 
-        return {
-            "refresh_token": new_token,
-            "claims": self.extract_claims(new_token),
-            "family_id": new_family_id,
-            "revoked_previous": True,
-        }
+            if await self.check_revoked_token(token=refresh_token):
+                raise AuthenticationException(detail="Refresh token has been revoked.", error_code="TOKEN_REVOKED")
+
+            new_family_id = family_id or str(claims.get("family_id") or claims.get("token_family_id") or self.generate_token_family_id())
+            new_token = self.create_refresh_token(
+                subject=subject or str(claims.get("sub") or ""),
+                device_id=device_id or claims.get("device_id"),
+                session_id=session_id or claims.get("session_id"),
+                family_id=new_family_id,
+            )
+            await self.revoke_token(refresh_token, reason="rotated")
+
+            if redis_client is not None:
+                family_key = self._family_key(new_family_id)
+                await redis_client.sadd(family_key, str(claims.get("jti") or ""), str(self.extract_claims(new_token).get("jti") or ""))
+                await redis_client.expire(family_key, max(self._calculate_ttl_seconds(claims), 60))
+
+            return {
+                "refresh_token": new_token,
+                "claims": self.extract_claims(new_token),
+                "family_id": new_family_id,
+                "revoked_previous": True,
+            }
+        finally:
+            if redis_client is not None and lock_key and lock_acquired:
+                await redis_client.delete(lock_key)
 
     def extract_user_id(self, token_or_claims: str | Mapping[str, Any]) -> str | None:
         """Extract the user subject identifier from a token or claims mapping."""
@@ -334,6 +347,15 @@ class TokenService:
             secret_value = os.getenv("JWT_SECRET_KEY")
         if not secret_value:
             raise RuntimeError("JWT secret key is not configured")
+
+        # If RS256 is configured, require a PEM-formatted key to avoid accidental
+        # use of an ordinary secret string as an RSA key. This prevents misconfiguration
+        # where a symmetric secret is used with an asymmetric algorithm.
+        algorithm = self._get_algorithm()
+        if algorithm == "RS256":
+            pem_markers = ("-----BEGIN PRIVATE KEY-----", "-----BEGIN PUBLIC KEY-----", "-----BEGIN RSA PRIVATE KEY-----")
+            if not any(marker in str(secret_value) for marker in pem_markers):
+                raise ValidationException(detail="RS256 requires a PEM-formatted RSA key configured in JWT_SECRET_KEY.", error_code="INVALID_JWT_KEY")
         return str(secret_value)
 
     def _get_algorithm(self) -> str:
@@ -374,6 +396,12 @@ class TokenService:
     def _family_key(self, family_id: str) -> str:
         """Build a Redis key for token-family tracking."""
         return f"{self._FAMILY_PREFIX}:{family_id}"
+
+    def _rotation_lock_key(self, jti: str) -> str:
+        """Build a short-lived Redis lock key for refresh-token rotation."""
+        if not jti:
+            return ""
+        return f"{self._ROTATION_LOCK_PREFIX}:{jti}"
 
     def _calculate_ttl_seconds(self, claims: Mapping[str, Any]) -> int:
         """Calculate a reasonable Redis TTL based on the token expiration claim."""

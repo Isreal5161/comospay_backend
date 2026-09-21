@@ -524,11 +524,12 @@ class WalletManager:
 
         return await self.get_wallet(wallet_id=wallet_id)
 
-    async def get_wallet(self, *, wallet_id: UUID) -> dict[str, Any]:
+    async def get_wallet(self, *, wallet_id: UUID, user_id: UUID | None = None) -> dict[str, Any]:
         """Retrieve wallet details by unique identifier.
 
         Args:
             wallet_id: Unique wallet identifier.
+            user_id: Optional authenticated user used to enforce object ownership.
 
         Returns:
             Dictionary containing wallet details.
@@ -541,6 +542,11 @@ class WalletManager:
             raise ValidationException(
                 detail=f"Wallet {wallet_id} not found.",
                 error_code="WALLET_NOT_FOUND",
+            )
+        if user_id is not None and wallet.user_id != user_id:
+            raise ValidationException(
+                detail="Wallet does not belong to the provided user.",
+                error_code="WALLET_ACCESS_DENIED",
             )
 
         return self._serialize_wallet(wallet)
@@ -586,13 +592,18 @@ class WalletManager:
         )
         return wallet is not None
 
-    async def get_wallet_balance(self, *, wallet_id: UUID) -> dict[str, Any]:
+    async def get_wallet_balance(self, *, wallet_id: UUID, user_id: UUID | None = None) -> dict[str, Any]:
         """Return a safe wallet balance summary without exposing sensitive ledger details."""
         wallet = await self.wallet_repository.get_by_id(wallet_id)
         if not wallet:
             raise ValidationException(
                 detail=f"Wallet {wallet_id} not found.",
                 error_code="WALLET_NOT_FOUND",
+            )
+        if user_id is not None and wallet.user_id != user_id:
+            raise ValidationException(
+                detail="Wallet does not belong to the provided user.",
+                error_code="WALLET_ACCESS_DENIED",
             )
         return {
             "wallet_id": str(wallet.id),
@@ -604,13 +615,18 @@ class WalletManager:
             "status": wallet.status,
         }
 
-    async def validate_wallet_status(self, *, wallet_id: UUID) -> dict[str, Any]:
+    async def validate_wallet_status(self, *, wallet_id: UUID, user_id: UUID | None = None) -> dict[str, Any]:
         """Return wallet status validation details without performing financial operations."""
         wallet = await self.wallet_repository.get_by_id(wallet_id)
         if not wallet:
             raise ValidationException(
                 detail=f"Wallet {wallet_id} not found.",
                 error_code="WALLET_NOT_FOUND",
+            )
+        if user_id is not None and wallet.user_id != user_id:
+            raise ValidationException(
+                detail="Wallet does not belong to the provided user.",
+                error_code="WALLET_ACCESS_DENIED",
             )
         return {
             "wallet_id": str(wallet.id),
@@ -622,13 +638,14 @@ class WalletManager:
         }
 
     async def validate_wallet_state(
-        self, *, wallet_id: UUID, required_status: str | None = None
+        self, *, wallet_id: UUID, required_status: str | None = None, user_id: UUID | None = None
     ) -> dict[str, Any]:
         """Validate wallet state and optional status requirement.
 
         Args:
             wallet_id: Unique wallet identifier.
             required_status: Optional required status for validation.
+            user_id: Optional authenticated user used to enforce object ownership.
 
         Returns:
             Dictionary containing wallet details.
@@ -641,6 +658,11 @@ class WalletManager:
             raise ValidationException(
                 detail=f"Wallet {wallet_id} not found.",
                 error_code="WALLET_NOT_FOUND",
+            )
+        if user_id is not None and wallet.user_id != user_id:
+            raise ValidationException(
+                detail="Wallet does not belong to the provided user.",
+                error_code="WALLET_ACCESS_DENIED",
             )
 
         if required_status and wallet.status != required_status:

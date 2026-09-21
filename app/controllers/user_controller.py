@@ -4,12 +4,12 @@ import logging
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
 from app.schemas.user_schema import UserUpdate
 from app.services.user_service import UserService
-from app.utils.exceptions import AppException
+from app.utils.exceptions import AppException, AuthorizationException
 from app.utils.logger import get_logger, log_api_event
 from app.utils.response import success_response
 
@@ -48,77 +48,93 @@ class UserController:
         self.router.get("/me/devices", status_code=status.HTTP_200_OK)(self.list_devices)
         self.router.get("/me/verification-status", status_code=status.HTTP_200_OK)(self.get_verification_status)
 
-    async def get_profile(self, user_id: UUID | None = None) -> dict[str, Any]:
+    async def get_profile(self, request: Request | None = None) -> dict[str, Any]:
         """Handle profile retrieval requests."""
-        target_user_id = user_id or self._resolve_user_id()
+        user_id = self._get_authenticated_user_id(request)
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
         return await self._execute(
             action="get_profile",
             handler=self.user_service.get_profile,
-            payload={"user_id": target_user_id},
+            payload={"user_id": user_id},
             success_message="Profile retrieved successfully.",
         )
 
-    async def update_profile(self, payload: ProfileUpdateRequest, user_id: UUID | None = None) -> dict[str, Any]:
+    async def update_profile(self, payload: ProfileUpdateRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle profile update requests."""
-        target_user_id = user_id or self._resolve_user_id()
+        user_id = self._get_authenticated_user_id(request)
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
         return await self._execute(
             action="update_profile",
             handler=self.user_service.update_profile,
-            payload={"user_id": target_user_id, "profile_data": payload.model_dump(exclude_unset=True)},
+            payload={"user_id": user_id, "profile_data": payload.model_dump(exclude_unset=True)},
             success_message="Profile updated successfully.",
         )
 
-    async def get_account_info(self, request: AccountInfoRequest) -> dict[str, Any]:
-        """Handle account information requests."""
+    async def get_account_info(self, request: Request | None = None) -> dict[str, Any]:
+        """Handle account information requests - only authenticated user can view their own account."""
+        user_id = self._get_authenticated_user_id(request)
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+        # IDOR FIX: Only allow viewing own account info
         return await self._execute(
             action="get_account_info",
             handler=self.user_service.get_profile,
-            payload={"user_id": request.user_id},
+            payload={"user_id": user_id},
             success_message="Account information retrieved successfully.",
         )
 
     async def upload_profile_image(
         self,
+        request: Request | None = None,
         file: UploadFile = File(...),
         public_id: str | None = None,
-        user_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Handle profile image upload requests."""
-        target_user_id = user_id or self._resolve_user_id()
+        user_id = self._get_authenticated_user_id(request)
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
         return await self._execute(
             action="upload_profile_image",
             handler=self.user_service.upload_profile_photo,
-            payload={"user_id": target_user_id, "file_path": file.filename or "", "public_id": public_id},
+            payload={"user_id": user_id, "file_path": file.filename or "", "public_id": public_id},
             success_message="Profile image uploaded successfully.",
         )
 
-    async def remove_profile_image(self, user_id: UUID | None = None) -> dict[str, Any]:
+    async def remove_profile_image(self, request: Request | None = None) -> dict[str, Any]:
         """Handle profile image removal requests."""
-        target_user_id = user_id or self._resolve_user_id()
+        user_id = self._get_authenticated_user_id(request)
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
         return await self._execute(
             action="remove_profile_image",
             handler=self.user_service.remove_profile_photo,
-            payload={"user_id": target_user_id},
+            payload={"user_id": user_id},
             success_message="Profile image removed successfully.",
         )
 
-    async def list_devices(self, user_id: UUID | None = None) -> dict[str, Any]:
+    async def list_devices(self, request: Request | None = None) -> dict[str, Any]:
         """Handle user device listing requests."""
-        target_user_id = user_id or self._resolve_user_id()
+        user_id = self._get_authenticated_user_id(request)
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
         return await self._execute(
             action="list_devices",
             handler=self.user_service.list_devices,
-            payload={"user_id": target_user_id},
+            payload={"user_id": user_id},
             success_message="Devices retrieved successfully.",
         )
 
-    async def get_verification_status(self, user_id: UUID | None = None) -> dict[str, Any]:
+    async def get_verification_status(self, request: Request | None = None) -> dict[str, Any]:
         """Handle account verification status requests."""
-        target_user_id = user_id or self._resolve_user_id()
+        user_id = self._get_authenticated_user_id(request)
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
         return await self._execute(
             action="get_verification_status",
             handler=self.user_service.get_kyc_status,
-            payload={"user_id": target_user_id},
+            payload={"user_id": user_id},
             success_message="Verification status retrieved successfully.",
         )
 
@@ -147,6 +163,28 @@ class UserController:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred while processing the request.",
         )
+
+    def _get_authenticated_user_id(self, request: Request | None) -> UUID | None:
+        """Extract and validate authenticated user_id from request context."""
+        if request is None:
+            return None
+        auth_user = getattr(request.state, "auth_user", None)
+        if auth_user is not None:
+            try:
+                user_id = getattr(auth_user, "user_id", None)
+                if user_id:
+                    return UUID(str(user_id))
+            except (ValueError, TypeError, AttributeError):
+                pass
+        auth_payload = getattr(request.state, "auth_payload", None)
+        if isinstance(auth_payload, dict):
+            raw_user_id = auth_payload.get("user_id") or auth_payload.get("sub")
+            if raw_user_id:
+                try:
+                    return UUID(str(raw_user_id))
+                except (ValueError, TypeError):
+                    pass
+        return None
 
     def _resolve_user_id(self) -> UUID:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")

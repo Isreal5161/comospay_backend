@@ -290,5 +290,14 @@ class NotificationService:
         self._log_entry("enable_in_app")
         return await self.preferences_service.enable_in_app(*args, **kwargs)
 
+    async def get_notification_by_id(self, notification_id: Any) -> Any:
+        """Retrieve a notification by ID for authorization checks."""
+        self._log_entry("get_notification_by_id", notification_id=str(notification_id))
+        repo = getattr(self.in_app_service, "repository", None)
+        if repo is None:
+            from app.utils.exceptions import NotificationException
+            raise NotificationException(detail="Notification repository not available.")
+        return await repo.get_by_id(notification_id)
+
     def _log_entry(self, action: str, **metadata: Any) -> None:
         self.logger.info("notification_service_delegation", extra={"action": action, **metadata})

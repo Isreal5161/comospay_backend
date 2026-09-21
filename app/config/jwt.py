@@ -6,6 +6,7 @@ from typing import Any
 from jose import ExpiredSignatureError, JWTError, jwt
 
 from app.config.settings import settings
+from app.services.auth.token_service import TokenService
 
 
 def _get_secret_key() -> str:
@@ -32,40 +33,25 @@ def _build_claims(subject: str, token_type: str, ttl: timedelta, extra_claims: d
 # Token utility: creates signed access tokens for API authentication.
 def create_access_token(subject: str, extra_claims: dict[str, Any] | None = None) -> str:
     """Create a signed access token with a configured expiration window."""
-    payload = _build_claims(
-        subject=subject,
-        token_type="access",
-        ttl=timedelta(minutes=settings.access_token_expire_minutes),
-        extra_claims=extra_claims,
-    )
-    return jwt.encode(payload, _get_secret_key(), algorithm=settings.jwt_algorithm)
+    return TokenService().create_access_token(subject=subject, extra_claims=extra_claims, ttl=timedelta(minutes=settings.access_token_expire_minutes))
 
 
 # Token utility: creates signed refresh tokens for session renewal.
 def create_refresh_token(subject: str, extra_claims: dict[str, Any] | None = None) -> str:
     """Create a signed refresh token with a configured expiration window."""
-    payload = _build_claims(
-        subject=subject,
-        token_type="refresh",
-        ttl=timedelta(days=settings.refresh_token_expire_days),
-        extra_claims=extra_claims,
-    )
-    return jwt.encode(payload, _get_secret_key(), algorithm=settings.jwt_algorithm)
+    return TokenService().create_refresh_token(subject=subject, extra_claims=extra_claims, ttl=timedelta(days=settings.refresh_token_expire_days))
 
 
 # Token utility: decodes and validates a JWT payload.
 def decode_token(token: str) -> dict[str, Any]:
     """Decode and validate a JWT, returning its claims or raising a value error."""
     try:
-        return jwt.decode(
-            token,
-            _get_secret_key(),
-            algorithms=[settings.jwt_algorithm],
-            options={"verify_exp": True},
-        )
-    except ExpiredSignatureError as exc:
-        raise ValueError("Token has expired") from exc
-    except JWTError as exc:
+        return TokenService().validate_token(token, expected_type=None)
+    except Exception as exc:
+        # Normalize exceptions to ValueError for callers expecting the old API.
+        message = str(exc)
+        if "expired" in message.lower():
+            raise ValueError("Token has expired") from exc
         raise ValueError("Invalid token") from exc
 
 

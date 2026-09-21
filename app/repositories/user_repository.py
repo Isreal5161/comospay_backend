@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import User
@@ -57,8 +57,8 @@ class UserRepository:
         if status:
             query = query.where(User.status == status)
 
-        count_result = await self.session.execute(query)
-        total = len(count_result.scalars().all())
+        count_result = await self.session.execute(select(func.count(User.id)).select_from(query.subquery()))
+        total = int(count_result.scalar_one() or 0)
 
         order_column = getattr(User, order_by, User.created_at)
         if descending:

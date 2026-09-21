@@ -195,6 +195,26 @@ class VirtualAccount(Base):
         nullable=True,
         doc="Timestamp when provisioning succeeded.",
     )
+    retry_owner_id: Mapped[str | None] = mapped_column(
+        "retry_owner_id",
+        String(255),
+        nullable=True,
+        index=True,
+        doc="Worker identifier that currently owns the active retry lease.",
+    )
+    retry_claimed_at: Mapped[datetime | None] = mapped_column(
+        "retry_claimed_at",
+        DateTime(timezone=True),
+        nullable=True,
+        doc="Timestamp when the current retry lease was acquired.",
+    )
+    retry_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        "retry_lease_expires_at",
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+        doc="Expiry timestamp for the current retry lease.",
+    )
 
     wallet: Mapped["Wallet"] = relationship(
         "Wallet",

@@ -5,11 +5,11 @@ from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.services.data_service import DataService
-from app.utils.exceptions import AppException
+from app.utils.exceptions import AppException, AuthorizationException
 from app.utils.logger import get_logger, log_api_event
 from app.utils.response import success_response
 
@@ -94,8 +94,15 @@ class DataController:
         self.router.post("/history", status_code=status.HTTP_200_OK)(self.get_purchase_history)
         self.router.get("/details/{reference}", status_code=status.HTTP_200_OK)(self.get_purchase_details)
 
-    async def purchase_data(self, payload: DataPurchaseRequest) -> dict[str, Any]:
+    async def purchase_data(self, payload: DataPurchaseRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle data purchase requests."""
+        # IDOR FIX: Validate authenticated user matches the user making the purchase
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot purchase data for another user.")
+
         return await self._execute(
             action="purchase_data",
             handler=self.data_service.purchase_data,
@@ -142,8 +149,16 @@ class DataController:
             success_message="Data price retrieved successfully.",
         )
 
-    async def get_purchase_status(self, reference: str) -> dict[str, Any]:
+    async def get_purchase_status(self, reference: str, request: Request | None = None) -> dict[str, Any]:
         """Handle data transaction status requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.data_service.get_transaction_user_id_by_reference(reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_purchase_status",
             handler=self.data_service.get_purchase_status,
@@ -151,8 +166,16 @@ class DataController:
             success_message="Data transaction status retrieved successfully.",
         )
 
-    async def reconcile_transaction(self, payload: DataReconciliationRequest) -> dict[str, Any]:
+    async def reconcile_transaction(self, payload: DataReconciliationRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle data reconciliation requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.data_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="reconcile_transaction",
             handler=self.data_service.reconcile_transaction,
@@ -160,8 +183,16 @@ class DataController:
             success_message="Data transaction reconciled successfully.",
         )
 
-    async def get_purchase_history(self, payload: DataHistoryRequest) -> dict[str, Any]:
+    async def get_purchase_history(self, payload: DataHistoryRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle data purchase history requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.data_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_purchase_history",
             handler=self.data_service.get_purchase_status,
@@ -169,14 +200,44 @@ class DataController:
             success_message="Data purchase history retrieved successfully.",
         )
 
-    async def get_purchase_details(self, reference: str) -> dict[str, Any]:
+    async def get_purchase_details(self, reference: str, request: Request | None = None) -> dict[str, Any]:
         """Handle data transaction detail requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.data_service.get_transaction_user_id_by_reference(reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_purchase_details",
             handler=self.data_service.get_purchase_details,
             payload={"reference": reference},
             success_message="Data transaction details retrieved successfully.",
         )
+
+    def _get_authenticated_user_id(self, request: Request | None) -> UUID | None:
+        """Extract and validate authenticated user_id from request context."""
+        if request is None:
+            return None
+        auth_user = getattr(request.state, "auth_user", None)
+        if auth_user is not None:
+            try:
+                user_id = getattr(auth_user, "user_id", None)
+                if user_id:
+                    return UUID(str(user_id))
+            except (ValueError, TypeError, AttributeError):
+                pass
+        auth_payload = getattr(request.state, "auth_payload", None)
+        if isinstance(auth_payload, dict):
+            raw_user_id = auth_payload.get("user_id") or auth_payload.get("sub")
+            if raw_user_id:
+                try:
+                    return UUID(str(raw_user_id))
+                except (ValueError, TypeError):
+                    pass
+        return None
 
     async def _execute(
         self,

@@ -148,6 +148,16 @@ class AuditLogRepository:
         result = await self.session.execute(select(func.count(AuditLog.id)))
         return int(result.scalar_one() or 0)
 
+    async def get_transaction_timeline_events(self, *, transaction_id: UUID) -> list[AuditLog]:
+        """Retrieve transaction-scoped audit events ordered by creation time."""
+        result = await self.session.execute(
+            select(AuditLog)
+            .where(AuditLog.resource_type == "transaction")
+            .where(AuditLog.resource_id == str(transaction_id))
+            .order_by(AuditLog.created_at.asc())
+        )
+        return list(result.scalars().all())
+
     async def delete_old_logs(self, older_than: datetime) -> int:
         """Delete audit logs older than the supplied timestamp."""
         result = await self.session.execute(delete(AuditLog).where(AuditLog.created_at < older_than))

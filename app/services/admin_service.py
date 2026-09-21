@@ -32,30 +32,56 @@ from app.services.admin import (
 class AdminService:
     """Thin administration façade that delegates to modular admin services."""
 
-    def __init__(self, logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        dashboard_service: DashboardService,
+        user_service: UserAdministrationService,
+        kyc_service: KYCService,
+        wallet_service: WalletAdministrationService,
+        transaction_service: TransactionAdministrationService,
+        payment_service: PaymentAdministrationService,
+        finance_service: FinanceService,
+        fraud_service: FraudService,
+        provider_service: ProviderAdministrationService,
+        settings_service: SettingsService,
+        audit_service: AuditService,
+        api_key_service: ApiKeyService,
+        notification_service: NotificationAdministrationService,
+        monitoring_service: MonitoringService,
+        report_service: ReportService,
+        staff_service: StaffAdministrationService,
+        support_service: SupportAdministrationService,
+        security_service: SecurityAdministrationService,
+        session_service: SessionAdministrationService,
+        product_service: ProductAdministrationService,
+        marketing_service: MarketingService,
+        merchant_service: MerchantService,
+        logger: logging.Logger | None = None,
+    ) -> None:
         self.logger = logger or logging.getLogger(__name__)
-        self.dashboard_service = DashboardService(logger=self.logger)
-        self.user_service = UserAdministrationService(logger=self.logger)
-        self.kyc_service = KYCService(logger=self.logger)
-        self.wallet_service = WalletAdministrationService(logger=self.logger)
-        self.transaction_service = TransactionAdministrationService(logger=self.logger)
-        self.payment_service = PaymentAdministrationService(logger=self.logger)
-        self.finance_service = FinanceService(logger=self.logger)
-        self.fraud_service = FraudService(logger=self.logger)
-        self.provider_service = ProviderAdministrationService(logger=self.logger)
-        self.settings_service = SettingsService(logger=self.logger)
-        self.audit_service = AuditService(logger=self.logger)
-        self.api_key_service = ApiKeyService(logger=self.logger)
-        self.notification_service = NotificationAdministrationService(logger=self.logger)
-        self.monitoring_service = MonitoringService(logger=self.logger)
-        self.report_service = ReportService(logger=self.logger)
-        self.staff_service = StaffAdministrationService(logger=self.logger)
-        self.support_service = SupportAdministrationService(logger=self.logger)
-        self.security_service = SecurityAdministrationService(logger=self.logger)
-        self.session_service = SessionAdministrationService(logger=self.logger)
-        self.product_service = ProductAdministrationService(logger=self.logger)
-        self.marketing_service = MarketingService(logger=self.logger)
-        self.merchant_service = MerchantService(logger=self.logger)
+        self.dashboard_service = dashboard_service
+        self.user_service = user_service
+        self.kyc_service = kyc_service
+        self.wallet_service = wallet_service
+        self.transaction_service = transaction_service
+        self.payment_service = payment_service
+        self.finance_service = finance_service
+        self.fraud_service = fraud_service
+        self.provider_service = provider_service
+        self.settings_service = settings_service
+        self.audit_service = audit_service
+        self.api_key_service = api_key_service
+        self.notification_service = notification_service
+        self.monitoring_service = monitoring_service
+        self.report_service = report_service
+        self.staff_service = staff_service
+        self.support_service = support_service
+        self.security_service = security_service
+        self.session_service = session_service
+        self.product_service = product_service
+        self.marketing_service = marketing_service
+        self.merchant_service = merchant_service
 
     async def get_dashboard_stats(self, **payload: Any) -> dict[str, Any]:
         return await self.dashboard_service.get_stats(**payload)
@@ -75,11 +101,56 @@ class AdminService:
     async def adjust_wallet(self, *, user_id, amount: float, reason: str, **payload: Any) -> dict[str, Any]:
         return await self.wallet_service.adjust_wallet(user_id=user_id, amount=amount, reason=reason, **payload)
 
+    async def list_wallets(self, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.list_wallets(**payload)
+
+    async def get_wallet_details(self, *, wallet_id, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.get_wallet_details(wallet_id=wallet_id, **payload)
+
+    async def get_user_wallet(self, *, user_id, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.get_user_wallet(user_id=user_id, **payload)
+
+    async def search_wallets(self, *, query: str, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.search_wallets(query=query, **payload)
+
+    async def wallet_history(self, *, wallet_id, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.wallet_history(wallet_id=wallet_id, **payload)
+
+    async def wallet_analytics(self, *, wallet_id, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.wallet_analytics(wallet_id=wallet_id, **payload)
+
+    async def freeze_wallet(self, *, wallet_id, reason: str | None = None, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.freeze_wallet(wallet_id=wallet_id, reason=reason, **payload)
+
+    async def unfreeze_wallet(self, *, wallet_id, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.unfreeze_wallet(wallet_id=wallet_id, **payload)
+
+    async def lock_wallet(self, *, wallet_id, amount: float, reason: str, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.lock_wallet(wallet_id=wallet_id, amount=amount, reason=reason, **payload)
+
+    async def unlock_wallet(self, *, wallet_id, amount: float, reason: str, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.unlock_wallet(wallet_id=wallet_id, amount=amount, reason=reason, **payload)
+
+    async def reconcile_wallet(self, *, wallet_id, dry_run: bool = True, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.reconcile_wallet(wallet_id=wallet_id, dry_run=dry_run, **payload)
+
     async def list_transactions(self, **payload: Any) -> dict[str, Any]:
         return await self.transaction_service.list_transactions(**payload)
 
+    async def get_transaction_details(self, *, transaction_id, **payload: Any) -> dict[str, Any]:
+        return await self.transaction_service.get_transaction_details(transaction_id=transaction_id, **payload)
+
     async def reverse_transaction(self, *, transaction_id: str, **payload: Any) -> dict[str, Any]:
         return await self.transaction_service.reverse_transaction(transaction_id=transaction_id, **payload)
+
+    async def retry_failed_transaction(self, *, transaction_id, **payload: Any) -> dict[str, Any]:
+        return await self.transaction_service.retry_failed_transaction(transaction_id=transaction_id, **payload)
+
+    async def resolve_transaction(self, *, transaction_id, **payload: Any) -> dict[str, Any]:
+        return await self.transaction_service.resolve_transaction(transaction_id=transaction_id, **payload)
+
+    async def transaction_timeline(self, *, transaction_id, **payload: Any) -> dict[str, Any]:
+        return await self.transaction_service.transaction_timeline(transaction_id=transaction_id, **payload)
 
     async def list_providers(self, **payload: Any) -> dict[str, Any]:
         return await self.provider_service.list_providers(**payload)

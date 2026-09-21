@@ -110,8 +110,8 @@ class OTPService:
         if not recipient:
             raise ValidationException("A recipient is required to send an OTP.")
 
-        self._assert_not_rate_limited(identifier=user_id or recipient, purpose=purpose)
-        self._assert_resend_allowed(identifier=user_id or recipient, purpose=purpose)
+        await self._assert_not_rate_limited(identifier=user_id or recipient, purpose=purpose)
+        await self._assert_resend_allowed(identifier=user_id or recipient, purpose=purpose)
 
         otp_code = self.generate_otp()
         reference_id = self.generate_secure_otp_reference_id()
@@ -183,7 +183,7 @@ class OTPService:
         if purpose and payload.get("purpose") != purpose:
             raise UnsupportedOtpTypeException(detail="OTP purpose does not match the requested context.")
 
-        if self.check_otp_expiration(reference_id=reference_id):
+        if await self.check_otp_expiration(reference_id=reference_id):
             await redis_client.delete(self._otp_key(reference_id))
             raise ExpiredOtpException()
 
@@ -210,7 +210,7 @@ class OTPService:
             raise InvalidOtpException(detail="A reference identifier is required.")
 
         self._validate_purpose(purpose or "")
-        self._assert_resend_allowed(identifier=user_id or reference_id, purpose=purpose or "email_verification")
+        await self._assert_resend_allowed(identifier=user_id or reference_id, purpose=purpose or "email_verification")
 
         redis_client = await self._get_redis_client()
         if redis_client is None:
@@ -329,14 +329,14 @@ class OTPService:
         if channel not in {"email", "sms"}:
             raise ValidationException("Unsupported delivery channel.")
 
-    def _assert_not_rate_limited(self, *, identifier: str, purpose: str) -> None:
+    async def _assert_not_rate_limited(self, *, identifier: str, purpose: str) -> None:
         """Raise when the identifier has exceeded the configured rate limit."""
-        if self._read_bool(self._rate_limit_key(identifier, purpose)):
+        if await self.check_rate_limiting(identifier=identifier, purpose=purpose):
             raise TooManyResendAttemptsException(detail="OTP rate limit exceeded.")
 
-    def _assert_resend_allowed(self, *, identifier: str, purpose: str) -> None:
+    async def _assert_resend_allowed(self, *, identifier: str, purpose: str) -> None:
         """Raise when a resend is attempted before the configured cooldown expires."""
-        if self.check_resend_cooldown(identifier=identifier, purpose=purpose):
+        if await self.check_resend_cooldown(identifier=identifier, purpose=purpose):
             raise ResendCooldownActiveException()
 
     async def _record_resend(self, *, identifier: str, purpose: str) -> None:

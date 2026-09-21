@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.provider import Provider
@@ -58,9 +59,9 @@ class ProviderRepository:
         descending: bool = True,
     ) -> tuple[list[Provider], int]:
         """Retrieve paginated providers with optional filtering."""
-        if page < 1:
+        if not isinstance(page, int) or page < 1:
             page = 1
-        if page_size < 1:
+        if not isinstance(page_size, int) or page_size < 1:
             page_size = 20
 
         query = select(Provider)
@@ -69,8 +70,8 @@ class ProviderRepository:
         if status:
             query = query.where(Provider.status == status)
 
-        count_result = await self.session.execute(query)
-        total = len(count_result.scalars().all())
+        count_result = await self.session.execute(select(func.count(Provider.id)).select_from(query.subquery()))
+        total = int(count_result.scalar_one() or 0)
 
         order_column = getattr(Provider, order_by, Provider.created_at)
         if descending:
@@ -86,6 +87,8 @@ class ProviderRepository:
         """Update editable provider fields in the database."""
         for field, value in fields.items():
             if hasattr(provider, field):
+                if field == "metadata_payload" and value is not None and not isinstance(value, str):
+                    value = json.dumps(value, default=str)
                 setattr(provider, field, value)
         self.session.add(provider)
         await self.session.flush()
@@ -93,11 +96,8 @@ class ProviderRepository:
         return provider
 
     async def disable_provider(self, provider: Provider, *, reason: str | None = None) -> Provider:
-        """Disable a provider record without applying business rules."""
-        provider.is_active = False
-        provider.status = "disabled"
-        if reason is not None:
-            provider.metadata_payload = reason if provider.metadata_payload is None else provider.metadata_payload
+        """Persist a provider entity prepared by domain services."""
+        _ = reason
         self.session.add(provider)
         await self.session.flush()
         await self.session.refresh(provider)

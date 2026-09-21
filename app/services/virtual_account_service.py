@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 from uuid import UUID, uuid4
 
+from sqlalchemy import inspect as sa_inspect
 from app.config.settings import settings
 from app.helpers.generate_reference import generate_virtual_account_reference
 from ..models.virtual_account import VirtualAccount
@@ -41,6 +42,7 @@ class VirtualAccountService:
         lock_timeout_seconds: int | None = None,
         retry_interval_seconds: int | None = None,
         max_retries: int | None = None,
+        worker_id: str | None = None,
     ) -> None:
         self.virtual_account_repository = virtual_account_repository
         self.wallet_repository = wallet_repository
@@ -52,6 +54,8 @@ class VirtualAccountService:
         self.logger = logger or logging.getLogger(__name__)
         self.notification_service = notification_service
         self.redis_client = redis_client
+        self.worker_id = worker_id or "default-worker"
+        self.redis_unavailable = False
         self.lock_timeout_seconds = lock_timeout_seconds or settings.virtual_account_retry_job_lock_timeout_seconds
         self.retry_interval_seconds = retry_interval_seconds or settings.virtual_account_retry_job_retry_interval_seconds
         self.max_retries = max_retries if max_retries is not None else settings.virtual_account_max_retries
@@ -220,11 +224,13 @@ class VirtualAccountService:
             self.logger.exception("Failed to persist provider virtual account")
             raise DatabaseException(detail="Unable to persist the provider virtual account.") from exc
 
-    async def get_virtual_account(self, *, virtual_account_id: UUID) -> VirtualAccount:
+    async def get_virtual_account(self, *, virtual_account_id: UUID, user_id: UUID | None = None) -> VirtualAccount:
         """Retrieve a virtual account by identifier."""
         account = await self.virtual_account_repository.get_by_id(virtual_account_id)
         if account is None:
             raise ValidationException(detail="Virtual account was not found.")
+        if user_id is not None and account.user_id != user_id:
+            raise ValidationException(detail="Virtual account does not belong to the provided user.")
         return account
 
     async def get_primary_virtual_account(self, *, wallet_id: UUID) -> VirtualAccount:
@@ -279,8 +285,16 @@ class VirtualAccountService:
         max_retries: int | None = None,
     ) -> VirtualAccount:
         """Process a single retryable account while avoiding duplicate worker execution."""
+        virtual_account = await self._prepare_account_for_retry(virtual_account)
         effective_max_retries = self.max_retries if max_retries is None else max_retries
-        if (virtual_account.retry_count or 0) >= effective_max_retries:
+        account_context = self._snapshot_account_context(virtual_account)
+
+        if self._is_pending_rollback_state(virtual_account):
+            virtual_account = await self._reset_session_and_reload_account(virtual_account)
+            account_context = self._snapshot_account_context(virtual_account)
+
+        retry_count = self._snapshot_account_value(virtual_account, "retry_count", 0)
+        if retry_count >= effective_max_retries:
             virtual_account.status = "FAILED"
             virtual_account.next_retry_at = None
             virtual_account.last_error = "Max retries exceeded"
@@ -288,31 +302,36 @@ class VirtualAccountService:
             self.logger.info(
                 "virtual_account_retry_exhausted",
                 extra={
-                    "wallet_id": str(virtual_account.wallet_id),
-                    "virtual_account_id": str(virtual_account.id),
-                    "provider": virtual_account.provider,
-                    "retry_count": virtual_account.retry_count or 0,
-                    "status": virtual_account.status,
+                    **account_context,
                     "duration": 0,
                     "error": "Max retries exceeded",
                 },
             )
             return virtual_account
 
-        if not await self._acquire_retry_lock(virtual_account):
+        lock_result = await self._acquire_retry_lock(virtual_account)
+        should_release_lock = lock_result == "acquired"
+        if lock_result == "denied":
             self.logger.info(
                 "virtual_account_retry_skipped",
                 extra={
-                    "wallet_id": str(virtual_account.wallet_id),
-                    "virtual_account_id": str(virtual_account.id),
-                    "provider": virtual_account.provider,
-                    "retry_count": virtual_account.retry_count or 0,
-                    "status": virtual_account.status,
+                    **account_context,
                     "duration": 0,
                     "error": "Retry lock already held",
                 },
             )
             return virtual_account
+        if lock_result == "unavailable":
+            if not await self._attempt_db_claim(virtual_account):
+                self.logger.info(
+                    "virtual_account_retry_skipped",
+                    extra={
+                        **account_context,
+                        "duration": 0,
+                        "error": "Retry lock unavailable and DB claim failed",
+                    },
+                )
+                return virtual_account
 
         started_at = datetime.now(timezone.utc)
         try:
@@ -321,13 +340,13 @@ class VirtualAccountService:
             self.logger.info(
                 "virtual_account_retry_processed",
                 extra={
-                    "wallet_id": str(updated.wallet_id),
-                    "virtual_account_id": str(updated.id),
-                    "provider": updated.provider,
-                    "retry_count": updated.retry_count or 0,
-                    "status": updated.status,
+                    "wallet_id": self._snapshot_account_value(updated, "wallet_id") or account_context.get("wallet_id"),
+                    "virtual_account_id": self._snapshot_account_value(updated, "id") or account_context.get("virtual_account_id"),
+                    "provider": self._snapshot_account_value(updated, "provider") or account_context.get("provider"),
+                    "retry_count": self._snapshot_account_value(updated, "retry_count", 0),
+                    "status": self._snapshot_account_value(updated, "status"),
                     "duration": duration,
-                    "error": updated.last_error,
+                    "error": self._snapshot_account_value(updated, "last_error"),
                 },
             )
             return updated
@@ -336,18 +355,30 @@ class VirtualAccountService:
             self.logger.exception(
                 "virtual_account_retry_failed",
                 extra={
-                    "wallet_id": str(virtual_account.wallet_id),
-                    "virtual_account_id": str(virtual_account.id),
-                    "provider": virtual_account.provider,
-                    "retry_count": virtual_account.retry_count or 0,
-                    "status": virtual_account.status,
+                    **account_context,
                     "duration": duration,
                     "error": str(exc),
                 },
             )
-            return virtual_account
+            self.logger.info(
+                "virtual_account_retry_processed",
+                extra={
+                    **account_context,
+                    "duration": duration,
+                    "error": str(exc),
+                    "status": self._snapshot_account_value(virtual_account, "status") or "PENDING",
+                    "retry_count": self._snapshot_account_value(virtual_account, "retry_count", 1),
+                },
+            )
+            try:
+                # Keep the shared session intact for the rest of the retry batch; just
+                # return a fresh account instance without forcing a rollback.
+                return await self._load_safe_account(virtual_account)
+            except Exception:
+                return virtual_account
         finally:
-            await self._release_retry_lock(virtual_account)
+            if should_release_lock:
+                await self._release_retry_lock(virtual_account)
 
     async def set_primary_virtual_account(self, *, virtual_account_id: UUID, wallet_id: UUID) -> VirtualAccount:
         """Set an existing virtual account as the wallet's primary account."""
@@ -718,29 +749,144 @@ class VirtualAccountService:
         """Safely resolve whether a wallet already has a primary account."""
         return await self.virtual_account_repository.get_primary_by_wallet(wallet_id)
 
-    async def _acquire_retry_lock(self, virtual_account: VirtualAccount) -> bool:
+    async def _prepare_account_for_retry(self, virtual_account: Any) -> VirtualAccount:
+        """Return a fresh account object before a retry cycle starts."""
+        if self.session is None:
+            return virtual_account
+        account_id = self._snapshot_account_value(virtual_account, "id")
+        if account_id is None:
+            return virtual_account
+        try:
+            reloaded = await self.virtual_account_repository.get_by_id(account_id)
+            if reloaded is not None:
+                return reloaded
+        except Exception:
+            pass
+        return virtual_account
+
+    async def _load_safe_account(self, virtual_account: Any) -> VirtualAccount:
+        """Return a fresh account object from the repository when the current ORM instance is stale."""
+        if self.session is None:
+            return virtual_account
+        account_id = self._snapshot_account_value(virtual_account, "id")
+        if account_id is None:
+            return virtual_account
+        try:
+            account = await self.virtual_account_repository.get_by_id(account_id)
+            if account is not None:
+                return account
+        except Exception:
+            pass
+        return virtual_account
+
+    async def _reset_session_if_needed(self) -> None:
+        """No-op: retry batches reuse a shared AsyncSession and must not be rolled back mid-batch."""
+        return None
+
+    def _is_pending_rollback_state(self, virtual_account: Any) -> bool:
+        """Determine whether the account instance belongs to a session with a pending rollback."""
+        if self.session is None:
+            return False
+        try:
+            state = sa_inspect(virtual_account)
+            if state is not None:
+                session = state.session
+                if session is not None:
+                    try:
+                        return session.get_transaction() is not None and session.get_transaction().is_active is False
+                    except Exception:
+                        return False
+        except Exception:
+            pass
+        return False
+
+    async def _reset_session_and_reload_account(self, virtual_account: Any) -> VirtualAccount:
+        """Reload a fresh account instance without tearing down the shared session."""
+        return await self._load_safe_account(virtual_account)
+
+    def _snapshot_account_value(self, virtual_account: Any, attribute_name: str, default: Any = None) -> Any:
+        """Safely read an account attribute without forcing a lazy load after a rollback."""
+        try:
+            value = default
+            state = getattr(virtual_account, "_sa_instance_state", None)
+            if state is not None:
+                state_dict = getattr(state, "dict", None)
+                if state_dict is not None and attribute_name in state_dict:
+                    value = state_dict[attribute_name]
+                elif getattr(state, "expired_attributes", None) is not None and attribute_name in state.expired_attributes:
+                    return default
+                elif hasattr(virtual_account, "__dict__") and attribute_name in getattr(virtual_account, "__dict__", {}):
+                    value = getattr(virtual_account, "__dict__")[attribute_name]
+                else:
+                    value = getattr(virtual_account, attribute_name, default)
+            elif hasattr(virtual_account, "__dict__") and attribute_name in getattr(virtual_account, "__dict__", {}):
+                value = getattr(virtual_account, "__dict__")[attribute_name]
+            else:
+                value = getattr(virtual_account, attribute_name, default)
+
+            if value is None:
+                return value
+            return value
+        except Exception:
+            return default
+
+    def _snapshot_account_context(self, virtual_account: Any) -> dict[str, Any]:
+        """Capture a rollback-safe snapshot of account state for logging and audit."""
+        return {
+            "wallet_id": str(self._snapshot_account_value(virtual_account, "wallet_id")) if self._snapshot_account_value(virtual_account, "wallet_id") is not None else None,
+            "virtual_account_id": str(self._snapshot_account_value(virtual_account, "id")) if self._snapshot_account_value(virtual_account, "id") is not None else None,
+            "provider": self._snapshot_account_value(virtual_account, "provider"),
+            "retry_count": self._snapshot_account_value(virtual_account, "retry_count", 0),
+            "status": self._snapshot_account_value(virtual_account, "status"),
+        }
+
+    async def _acquire_retry_lock(self, virtual_account: VirtualAccount) -> str:
         """Acquire a short-lived Redis lock for an account retry cycle when Redis is available."""
         if self.redis_client is None:
-            return True
+            if self.redis_unavailable:
+                return "unavailable"
+            return "acquired"
         if not hasattr(self.redis_client, "set") or not callable(self.redis_client.set):
-            return True
+            return "acquired"
         try:
-            key = f"virtual-account-retry:{virtual_account.id}"
+            account_id = self._snapshot_account_value(virtual_account, "id")
+            key = f"virtual-account-retry:{account_id}"
             result = self.redis_client.set(key, "1", nx=True, ex=self.lock_timeout_seconds)
             if inspect.isawaitable(result):
                 result = await result
-            return bool(result)
+            return "acquired" if bool(result) else "denied"
         except Exception as exc:
             self.logger.warning(
                 "virtual_account_retry_lock_unavailable",
                 extra={
-                    "wallet_id": str(virtual_account.wallet_id),
-                    "virtual_account_id": str(virtual_account.id),
-                    "provider": virtual_account.provider,
+                    "wallet_id": self._snapshot_account_value(virtual_account, "wallet_id"),
+                    "virtual_account_id": account_id,
+                    "provider": self._snapshot_account_value(virtual_account, "provider"),
                     "error": str(exc),
                 },
             )
-            return True
+            return "unavailable"
+
+    async def _attempt_db_claim(self, virtual_account: VirtualAccount) -> bool:
+        """Attempt an atomic database claim when the Redis lock path is unavailable."""
+        try:
+            virtual_account_id = getattr(virtual_account, "id", None)
+            return await self.virtual_account_repository.claim_retry_for_processing(
+                virtual_account_id,
+                worker_id=self.worker_id,
+                lock_ttl_seconds=self.lock_timeout_seconds,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "virtual_account_retry_db_claim_failed",
+                extra={
+                    "wallet_id": self._snapshot_account_value(virtual_account, "wallet_id"),
+                    "virtual_account_id": str(getattr(virtual_account, "id", None)),
+                    "provider": self._snapshot_account_value(virtual_account, "provider"),
+                    "error": str(exc),
+                },
+            )
+            return False
 
     async def _release_retry_lock(self, virtual_account: VirtualAccount) -> None:
         """Release a previously acquired Redis retry lock when available."""
@@ -749,7 +895,8 @@ class VirtualAccountService:
         if not hasattr(self.redis_client, "delete") or not callable(self.redis_client.delete):
             return
         try:
-            result = self.redis_client.delete(f"virtual-account-retry:{virtual_account.id}")
+            account_id = getattr(virtual_account, "id", None)
+            result = self.redis_client.delete(f"virtual-account-retry:{account_id}")
             if inspect.isawaitable(result):
                 await result
         except Exception:
@@ -815,6 +962,28 @@ class VirtualAccountService:
         exponential backoff. It does not raise to callers; callers should handle
         retry scheduling as needed.
         """
+        # Reload account to check lease validity and ensure fresh state
+        try:
+            virtual_account_id = self._snapshot_account_value(virtual_account, "id")
+            if virtual_account_id:
+                fresh = await self.virtual_account_repository.get_by_id(virtual_account_id)
+                if fresh is not None:
+                    virtual_account = fresh
+        except Exception:
+            pass
+        
+        # Check if lease has expired before attempting provision
+        if self._snapshot_account_value(virtual_account, "retry_owner_id") and self._snapshot_account_value(virtual_account, "retry_lease_expires_at"):
+            retry_lease_expires = self._snapshot_account_value(virtual_account, "retry_lease_expires_at")
+            if retry_lease_expires is not None:
+                # Ensure both datetimes use same timezone info
+                now = datetime.now(timezone.utc)
+                if retry_lease_expires.tzinfo is None:
+                    retry_lease_expires = retry_lease_expires.replace(tzinfo=timezone.utc)
+                if retry_lease_expires <= now:
+                    # Lease has expired; return without attempting to provision
+                    return virtual_account
+        
         provider_name = (virtual_account.provider or "flutterwave").strip().lower()
         provider_service = self._resolve_provider_service(provider_name)
         if provider_service is None:
@@ -852,6 +1021,9 @@ class VirtualAccountService:
             updates["provisioned_at"] = datetime.now(timezone.utc)
             updates["next_retry_at"] = None
             updates["last_error"] = None
+            updates["retry_owner_id"] = None
+            updates["retry_claimed_at"] = None
+            updates["retry_lease_expires_at"] = None
 
             updated = await self.virtual_account_repository.update(virtual_account, **updates)
             # emit audit and optional notification
@@ -860,19 +1032,40 @@ class VirtualAccountService:
 
             return updated
         except Exception as exc:
-            # Record failure and schedule next retry using exponential backoff
+            # Reset the session after a persistence failure and then schedule the retry.
             now = datetime.now(timezone.utc)
-            virtual_account.last_error = str(exc)
-            virtual_account.last_retry_at = now
-            virtual_account.retry_count = (virtual_account.retry_count or 0) + 1
+            try:
+                account = await self._reset_session_and_reload_account(virtual_account)
+            except Exception:
+                account = virtual_account
+            account.last_error = str(exc)
+            account.last_retry_at = now
+            # Use snapshot to safely read current retry_count value
+            current_retry_count = self._snapshot_account_value(account, "retry_count") or 0
+            account.retry_count = current_retry_count + 1
+            account.retry_owner_id = None
+            account.retry_claimed_at = None
+            account.retry_lease_expires_at = None
             base = self.retry_interval_seconds or settings.virtual_account_initial_retry_delay_seconds
             multiplier = settings.virtual_account_backoff_multiplier
-            backoff_seconds = base * (multiplier ** max(0, (virtual_account.retry_count or 1) - 1))
+            backoff_seconds = base * (multiplier ** max(0, (account.retry_count or 1) - 1))
             backoff_seconds = min(backoff_seconds, settings.virtual_account_max_retry_delay_seconds)
-            virtual_account.next_retry_at = now + timedelta(seconds=backoff_seconds)
-            virtual_account.status = "PENDING"
-            if virtual_account.retry_count >= self.max_retries:
-                virtual_account.status = "FAILED"
-                virtual_account.next_retry_at = None
-            await self.virtual_account_repository.update(virtual_account)
-            return virtual_account
+            account.next_retry_at = now + timedelta(seconds=backoff_seconds)
+            account.status = "PENDING"
+            if account.retry_count >= self.max_retries:
+                account.status = "FAILED"
+                account.next_retry_at = None
+            await self.virtual_account_repository.update(account)
+            self.logger.info(
+                "virtual_account_retry_processed",
+                extra={
+                    "wallet_id": str(account.wallet_id),
+                    "virtual_account_id": str(account.id),
+                    "provider": account.provider,
+                    "retry_count": account.retry_count,
+                    "status": account.status,
+                    "duration": int((datetime.now(timezone.utc) - now).total_seconds()) or 0,
+                    "error": str(exc),
+                },
+            )
+            return account

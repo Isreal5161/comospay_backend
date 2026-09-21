@@ -57,8 +57,8 @@ class ProviderLogRepository:
         if status:
             query = query.where(ProviderLog.status == status)
 
-        count_result = await self.session.execute(query)
-        total = len(count_result.scalars().all())
+        count_result = await self.session.execute(select(func.count(ProviderLog.id)).select_from(query.subquery()))
+        total = int(count_result.scalar_one() or 0)
 
         order_column = getattr(ProviderLog, order_by, ProviderLog.created_at)
         if descending:
@@ -78,8 +78,8 @@ class ProviderLogRepository:
             page_size = 20
 
         query = select(ProviderLog).where(ProviderLog.success.is_(False))
-        count_result = await self.session.execute(query)
-        total = len(count_result.scalars().all())
+        count_result = await self.session.execute(select(func.count(ProviderLog.id)).where(ProviderLog.success.is_(False)))
+        total = int(count_result.scalar_one() or 0)
 
         result = await self.session.execute(
             query.order_by(ProviderLog.created_at.desc()).offset((page - 1) * page_size).limit(page_size)

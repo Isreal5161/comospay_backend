@@ -5,11 +5,11 @@ from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.services.tv_service import TVService
-from app.utils.exceptions import AppException
+from app.utils.exceptions import AppException, AuthorizationException
 from app.utils.logger import get_logger, log_api_event
 from app.utils.response import success_response
 
@@ -113,8 +113,15 @@ class TVController:
         self.router.post("/history", status_code=status.HTTP_200_OK)(self.get_purchase_history)
         self.router.get("/details/{reference}", status_code=status.HTTP_200_OK)(self.get_purchase_details)
 
-    async def purchase_tv(self, payload: TVSubscriptionRequest) -> dict[str, Any]:
+    async def purchase_tv(self, payload: TVSubscriptionRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle TV subscription purchase requests."""
+        # IDOR FIX: Validate authenticated user matches the user making the subscription
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot subscribe to TV service for another user.")
+        
         return await self._execute(
             action="purchase_tv",
             handler=self.tv_service.purchase_tv,
@@ -185,8 +192,16 @@ class TVController:
             success_message="TV providers retrieved successfully.",
         )
 
-    async def get_purchase_status(self, reference: str) -> dict[str, Any]:
+    async def get_purchase_status(self, reference: str, request: Request | None = None) -> dict[str, Any]:
         """Handle TV transaction status requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.tv_service.get_transaction_user_id_by_reference(reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_purchase_status",
             handler=self.tv_service.get_purchase_status,
@@ -194,8 +209,16 @@ class TVController:
             success_message="TV transaction status retrieved successfully.",
         )
 
-    async def reconcile_transaction(self, payload: TVReconciliationRequest) -> dict[str, Any]:
+    async def reconcile_transaction(self, payload: TVReconciliationRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle TV reconciliation requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.tv_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="reconcile_transaction",
             handler=self.tv_service.reconcile_transaction,
@@ -203,8 +226,16 @@ class TVController:
             success_message="TV transaction reconciled successfully.",
         )
 
-    async def get_purchase_history(self, payload: TVHistoryRequest) -> dict[str, Any]:
+    async def get_purchase_history(self, payload: TVHistoryRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle TV purchase history requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.tv_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_purchase_history",
             handler=self.tv_service.get_purchase_status,
@@ -212,14 +243,44 @@ class TVController:
             success_message="TV purchase history retrieved successfully.",
         )
 
-    async def get_purchase_details(self, reference: str) -> dict[str, Any]:
+    async def get_purchase_details(self, reference: str, request: Request | None = None) -> dict[str, Any]:
         """Handle TV transaction detail requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.tv_service.get_transaction_user_id_by_reference(reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_purchase_details",
             handler=self.tv_service.get_purchase_details,
             payload={"reference": reference},
             success_message="TV transaction details retrieved successfully.",
         )
+
+    def _get_authenticated_user_id(self, request: Request | None) -> UUID | None:
+        """Extract and validate authenticated user_id from request context."""
+        if request is None:
+            return None
+        auth_user = getattr(request.state, "auth_user", None)
+        if auth_user is not None:
+            try:
+                user_id = getattr(auth_user, "user_id", None)
+                if user_id:
+                    return UUID(str(user_id))
+            except (ValueError, TypeError, AttributeError):
+                pass
+        auth_payload = getattr(request.state, "auth_payload", None)
+        if isinstance(auth_payload, dict):
+            raw_user_id = auth_payload.get("user_id") or auth_payload.get("sub")
+            if raw_user_id:
+                try:
+                    return UUID(str(raw_user_id))
+                except (ValueError, TypeError):
+                    pass
+        return None
 
     async def _execute(
         self,

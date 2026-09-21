@@ -10,6 +10,8 @@ from pydantic import SecretStr
 from app.controllers.webhook_controller import WebhookController
 from app.integrations.payments.flutterwave.client import FlutterwaveClient
 from app.routes.webhook_routes import get_webhook_service
+from app.services.webhook_service import WebhookService
+from app.utils.exceptions import ValidationException
 
 
 class DummyWebhookService:
@@ -24,6 +26,14 @@ class DummyWebhookService:
 
     async def process_flutterwave_webhook(self, *, provider_name: str, event_id: str | None, payload: dict[str, object], signature: str | None = None, timestamp: str | None = None, secret: str | None = None) -> dict[str, object]:
         self.processed_payloads.append({"provider_name": provider_name, "event_id": event_id, "payload": payload, "signature": signature, "timestamp": timestamp, "secret": secret})
+        return {"status": "ok"}
+
+    async def process_vtu_webhook(self, *, provider_name: str, payload: dict[str, object]) -> dict[str, object]:
+        self.processed_payloads.append({"provider_name": provider_name, "payload": payload})
+        return {"status": "ok"}
+
+    async def process_notification_webhook(self, *, payload: dict[str, object]) -> dict[str, object]:
+        self.processed_payloads.append({"payload": payload})
         return {"status": "ok"}
 
 
@@ -141,3 +151,56 @@ async def test_webhook_controller_rejects_missing_secret(monkeypatch: pytest.Mon
 
     assert exc_info.value.status_code == 401
     assert not service.processed_payloads
+
+
+@pytest.mark.asyncio
+async def test_provider_webhook_enforces_signature_and_handles_payload_tuple(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DummyWebhookService(should_verify=True)
+    controller = WebhookController(service)
+    monkeypatch.setattr("app.controllers.webhook_controller.settings", SimpleNamespace(flutterwave_webhook_secret=SecretStr("configured-secret")))
+
+    request = DummyRequest(
+        {
+            "provider_name": "aidapay",
+            "payload": {"event": "callback"},
+            "signature": "signature",
+            "timestamp": "1234567890",
+        },
+        headers={"x-provider-name": "aidapay", "x-webhook-signature": "signature", "x-webhook-timestamp": "1234567890"},
+    )
+
+    response = await controller.handle_provider_webhook(request)
+
+    assert response["data"]["status"] == "ok"
+    assert service.verify_calls
+    assert service.processed_payloads[0]["provider_name"] == "aidapay"
+
+
+@pytest.mark.asyncio
+async def test_notification_webhook_rejects_invalid_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DummyWebhookService(should_verify=False)
+    controller = WebhookController(service)
+    monkeypatch.setattr("app.controllers.webhook_controller.settings", SimpleNamespace(flutterwave_webhook_secret=SecretStr("configured-secret")))
+
+    request = DummyRequest(
+        {
+            "payload": {"event": "delivered"},
+            "signature": "bad-signature",
+            "timestamp": "1234567890",
+        },
+        headers={"x-webhook-signature": "bad-signature", "x-webhook-timestamp": "1234567890"},
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await controller.handle_notification_webhook(request)
+
+    assert exc_info.value.status_code == 401
+    assert not service.processed_payloads
+
+
+@pytest.mark.asyncio
+async def test_webhook_service_fails_when_notification_dependency_is_missing() -> None:
+    service = WebhookService(notification_service=None)
+
+    with pytest.raises(ValidationException):
+        await service.process_notification_webhook(payload={"event": "delivered"})

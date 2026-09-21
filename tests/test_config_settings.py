@@ -16,6 +16,43 @@ def test_production_requires_critical_security_settings() -> None:
         )
 
 
+def test_production_rejects_weak_default_jwt_secret() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://prod_user:StrongProdPass!@prod-db.example.com:5432/cosmozpay",
+            redis_url="redis://prod-redis.internal:6379/0",
+            jwt_secret_key="change-me-in-production",
+        )
+
+
+def test_production_rejects_default_local_database_credentials() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="production",
+            database_url="postgresql+psycopg://postgres:postgres@localhost:5432/cosmozpay",
+            redis_url="redis://prod-redis.internal:6379/0",
+            jwt_secret_key="a-very-secure-production-secret-32+chars",
+        )
+
+
+def test_production_accepts_explicit_secure_configuration() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://prod_user:StrongProdPass!@prod-db.example.com:5432/cosmozpay",
+        redis_url="redis://prod-redis.internal:6379/0",
+        jwt_secret_key="a-very-secure-production-secret-32+chars",
+        cors_allow_origins=["https://app.cosmozpay.com"],
+        trusted_hosts=["app.cosmozpay.com"],
+    )
+
+    assert settings.app_env == "production"
+    assert settings.database_url.startswith("postgresql+asyncpg://")
+    assert settings.jwt_secret_key is not None
+    assert settings.cors_allow_origins == ["https://app.cosmozpay.com"]
+    assert settings.trusted_hosts == ["app.cosmozpay.com"]
+
+
 def test_development_supports_missing_optional_provider_credentials() -> None:
     settings = Settings(
         app_env="development",

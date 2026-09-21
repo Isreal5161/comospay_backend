@@ -4,7 +4,7 @@ import logging
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 
 from app.schemas.user_schema import UserCreate, UserLoginSchema
@@ -229,26 +229,28 @@ class AuthController:
             success_message="Password reset successfully.",
         )
 
-    async def change_password(self, payload: ChangePasswordRequest) -> dict[str, Any]:
+    async def change_password(self, payload: ChangePasswordRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle change password requests."""
+        effective_user_id = self._resolve_authenticated_user_id(request) or payload.user_id
         return await self._execute(
             action="change_password",
             handler=self.auth_service.change_password,
             payload={
-                "user_id": payload.user_id,
+                "user_id": effective_user_id,
                 "current_password": payload.current_password,
                 "new_password": payload.new_password,
             },
             success_message="Password changed successfully.",
         )
 
-    async def verify_device(self, payload: DeviceVerificationRequest) -> dict[str, Any]:
+    async def verify_device(self, payload: DeviceVerificationRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle device verification requests."""
+        effective_user_id = self._resolve_authenticated_user_id(request) or payload.user_id
         return await self._execute(
             action="verify_device",
             handler=self.auth_service.verify_device,
             payload={
-                "user_id": payload.user_id,
+                "user_id": effective_user_id,
                 "device_fingerprint": payload.device_fingerprint,
                 "ip_address": payload.ip_address,
                 "device_name": payload.device_name,
@@ -256,6 +258,22 @@ class AuthController:
             },
             success_message="Device verified successfully.",
         )
+
+    def _resolve_authenticated_user_id(self, request: Request | None) -> UUID | None:
+        if request is None:
+            return None
+        auth_user = getattr(request.state, "auth_user", None)
+        raw_user_id = getattr(auth_user, "user_id", None) if auth_user is not None else None
+        if raw_user_id is None:
+            auth_payload = getattr(request.state, "auth_payload", None)
+            if isinstance(auth_payload, dict):
+                raw_user_id = auth_payload.get("user_id") or auth_payload.get("sub")
+        if raw_user_id is None:
+            return None
+        try:
+            return UUID(str(raw_user_id))
+        except (ValueError, TypeError):
+            return None
 
     async def _execute(
         self,

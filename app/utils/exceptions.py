@@ -60,6 +60,13 @@ class WalletException(AppException):
         super().__init__(status_code=status.HTTP_400_BAD_REQUEST, detail=detail, error_code=error_code)
 
 
+class DuplicateProviderReferenceException(ValidationException):
+    """Raised when a provider-scoped provider_reference is duplicated."""
+
+    def __init__(self, detail: str = "Duplicate provider reference detected.", error_code: str = "DUPLICATE_PROVIDER_REFERENCE") -> None:
+        super().__init__(detail=detail, error_code=error_code)
+
+
 class OTPException(AppException):
     """Raised for OTP generation or validation failures."""
 

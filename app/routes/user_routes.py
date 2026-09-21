@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, File, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
@@ -66,42 +66,40 @@ async def get_user_controller(user_service: UserService = Depends(get_user_servi
 
 
 @router.get("/me", status_code=status.HTTP_200_OK)
-async def get_profile(user_id: UUID | None = None, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
-    return await controller.get_profile(user_id=user_id)
+async def get_profile(request: Request, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
+    return await controller.get_profile(request=request)
 
 
 @router.put("/me", status_code=status.HTTP_200_OK)
-async def update_profile(payload: ProfileUpdateRequest, user_id: UUID | None = None, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
-    return await controller.update_profile(payload, user_id=user_id)
+async def update_profile(request: Request, payload: ProfileUpdateRequest, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
+    return await controller.update_profile(payload, request=request)
 
 
 @router.get("/me/account", status_code=status.HTTP_200_OK)
-async def get_account_info(payload: AccountInfoRequest, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
-    return await controller.get_account_info(payload)
+async def get_account_info(request: Request, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
+    return await controller.get_account_info(request=request)
 
 
 @router.post("/me/profile-image", status_code=status.HTTP_201_CREATED)
 async def upload_profile_image(
+    request: Request,
+    file: UploadFile = File(...),
     public_id: str | None = None,
-    user_id: UUID | None = None,
     controller: UserController = Depends(get_user_controller),
 ) -> dict[str, Any]:
-    # File upload requires runtime multipart parsing. The controller method
-    # expects an UploadFile at runtime; here we defer that handling to the
-    # controller when FastAPI provides the file during request handling.
-    return await controller.upload_profile_image(file=None, public_id=public_id, user_id=user_id)
+    return await controller.upload_profile_image(request=request, file=file, public_id=public_id)
 
 
 @router.delete("/me/profile-image", status_code=status.HTTP_200_OK)
-async def remove_profile_image(user_id: UUID | None = None, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
-    return await controller.remove_profile_image(user_id=user_id)
+async def remove_profile_image(request: Request, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
+    return await controller.remove_profile_image(request=request)
 
 
 @router.get("/me/devices", status_code=status.HTTP_200_OK)
-async def list_devices(user_id: UUID | None = None, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
-    return await controller.list_devices(user_id=user_id)
+async def list_devices(request: Request, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
+    return await controller.list_devices(request=request)
 
 
 @router.get("/me/verification-status", status_code=status.HTTP_200_OK)
-async def get_verification_status(user_id: UUID | None = None, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
-    return await controller.get_verification_status(user_id=user_id)
+async def get_verification_status(request: Request, controller: UserController = Depends(get_user_controller)) -> dict[str, Any]:
+    return await controller.get_verification_status(request=request)

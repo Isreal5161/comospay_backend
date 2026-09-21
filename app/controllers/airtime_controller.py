@@ -5,11 +5,11 @@ from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.services.airtime_service import AirtimeService
-from app.utils.exceptions import AppException
+from app.utils.exceptions import AppException, AuthorizationException
 from app.utils.logger import get_logger, log_api_event
 from app.utils.response import success_response
 
@@ -91,8 +91,15 @@ class AirtimeController:
         self.router.post("/history", status_code=status.HTTP_200_OK)(self.get_purchase_history)
         self.router.get("/details/{reference}", status_code=status.HTTP_200_OK)(self.get_purchase_details)
 
-    async def purchase_airtime(self, payload: AirtimePurchaseRequest) -> dict[str, Any]:
+    async def purchase_airtime(self, payload: AirtimePurchaseRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle airtime purchase requests."""
+        # IDOR FIX: Validate authenticated user matches the user making the purchase
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot purchase airtime for another user.")
+
         return await self._execute(
             action="purchase_airtime",
             handler=self.airtime_service.purchase_airtime,
@@ -111,8 +118,15 @@ class AirtimeController:
             success_message="Airtime purchase initiated successfully.",
         )
 
-    async def validate_purchase_request(self, payload: AirtimeValidationRequest) -> dict[str, Any]:
+    async def validate_purchase_request(self, payload: AirtimeValidationRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle airtime validation requests."""
+        # IDOR FIX: Validate authenticated user matches the user validating the purchase
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        if payload.user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot validate airtime purchase for another user.")
+
         return await self._execute(
             action="validate_purchase_request",
             handler=self.airtime_service.validate_purchase_request,
@@ -145,8 +159,16 @@ class AirtimeController:
             success_message="Airtime pricing breakdown retrieved successfully.",
         )
 
-    async def get_purchase_status(self, reference: str) -> dict[str, Any]:
+    async def get_purchase_status(self, reference: str, request: Request | None = None) -> dict[str, Any]:
         """Handle airtime transaction status requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.airtime_service.get_transaction_user_id_by_reference(reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_purchase_status",
             handler=self.airtime_service.get_purchase_status,
@@ -154,8 +176,16 @@ class AirtimeController:
             success_message="Airtime transaction status retrieved successfully.",
         )
 
-    async def reconcile_transaction(self, payload: AirtimeReconciliationRequest) -> dict[str, Any]:
+    async def reconcile_transaction(self, payload: AirtimeReconciliationRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle airtime reconciliation requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.airtime_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="reconcile_transaction",
             handler=self.airtime_service.reconcile_transaction,
@@ -163,8 +193,16 @@ class AirtimeController:
             success_message="Airtime transaction reconciled successfully.",
         )
 
-    async def get_purchase_history(self, payload: AirtimeHistoryRequest) -> dict[str, Any]:
+    async def get_purchase_history(self, payload: AirtimeHistoryRequest, request: Request | None = None) -> dict[str, Any]:
         """Handle airtime purchase history requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.airtime_service.get_transaction_user_id_by_reference(payload.reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_purchase_history",
             handler=self.airtime_service.get_purchase_status,
@@ -172,14 +210,49 @@ class AirtimeController:
             success_message="Airtime purchase history retrieved successfully.",
         )
 
-    async def get_purchase_details(self, reference: str) -> dict[str, Any]:
+    async def get_purchase_details(self, reference: str, request: Request | None = None) -> dict[str, Any]:
         """Handle airtime transaction detail requests."""
+        # IDOR FIX: Verify user owns the transaction
+        authenticated_user_id = self._get_authenticated_user_id(request)
+        if authenticated_user_id is None:
+            raise AuthorizationException("Authentication required.")
+        transaction_user_id = await self.airtime_service.get_transaction_user_id_by_reference(reference)
+        if transaction_user_id is not None and transaction_user_id != authenticated_user_id:
+            raise AuthorizationException("Cannot access transaction belonging to another user.")
+        
         return await self._execute(
             action="get_purchase_details",
             handler=self.airtime_service.get_purchase_details,
             payload={"reference": reference},
             success_message="Airtime transaction details retrieved successfully.",
         )
+
+    def _get_authenticated_user_id(self, request: Request | None) -> UUID | None:
+        """Extract and validate authenticated user_id from request context."""
+        if request is None:
+            return None
+        
+        # Try to get authenticated user from request.state set by AuthMiddleware
+        auth_user = getattr(request.state, "auth_user", None)
+        if auth_user is not None:
+            try:
+                user_id = getattr(auth_user, "user_id", None)
+                if user_id:
+                    return UUID(str(user_id))
+            except (ValueError, TypeError, AttributeError):
+                pass
+        
+        # Fallback to auth_payload
+        auth_payload = getattr(request.state, "auth_payload", None)
+        if isinstance(auth_payload, dict):
+            raw_user_id = auth_payload.get("user_id") or auth_payload.get("sub")
+            if raw_user_id:
+                try:
+                    return UUID(str(raw_user_id))
+                except (ValueError, TypeError):
+                    pass
+        
+        return None
 
     async def _execute(
         self,

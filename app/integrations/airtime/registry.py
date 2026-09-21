@@ -82,13 +82,13 @@ def build_vtu_provider_registry(*, settings_obj: Settings = settings) -> Provide
     )
     registry.register_provider(
         name="vtugate",
-        priority=20,
+        priority=30,
         api_key=settings_obj.vtugate_api_key,
         factory=lambda: VTUGateProvider(api_key=settings_obj.vtugate_api_key, base_url=settings_obj.vtugate_base_url),
     )
     registry.register_provider(
         name="clubconnect",
-        priority=30,
+        priority=20,
         api_key=settings_obj.clubconnect_api_key or settings_obj.clubkonnect_api_key,
         factory=lambda: ClubConnectProvider(
             api_key=settings_obj.clubconnect_api_key or settings_obj.clubkonnect_api_key,
