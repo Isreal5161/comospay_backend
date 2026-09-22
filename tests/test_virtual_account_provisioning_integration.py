@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -198,6 +199,58 @@ def build_retry_job(
 
     job._build_service = _build_service.__get__(job, VirtualAccountRetryJob)
     return job
+
+
+@pytest.mark.asyncio
+async def test_create_virtual_account_masks_account_number_in_logs(caplog):
+    wallet_id = uuid4()
+    user_id = uuid4()
+    account_number = "1234567890"
+
+    service = VirtualAccountService(
+        virtual_account_repository=SimpleNamespace(
+            create=AsyncMock(
+                return_value=SimpleNamespace(
+                    id=uuid4(),
+                    wallet_id=wallet_id,
+                    user_id=user_id,
+                    provider="flutterwave",
+                    account_number=account_number,
+                    is_primary=True,
+                )
+            )
+        ),
+        wallet_repository=SimpleNamespace(
+            get_by_id=AsyncMock(
+                return_value=SimpleNamespace(
+                    user_id=user_id,
+                    is_active=True,
+                    is_frozen=False,
+                    is_suspended=False,
+                    status="active",
+                )
+            )
+        ),
+        user_repository=SimpleNamespace(get_by_id=AsyncMock(return_value=SimpleNamespace(id=user_id))),
+        provider_services={},
+        logger=logging.getLogger("virtual_account_mask_test"),
+    )
+    service._check_duplicate_account = AsyncMock()
+    service._resolve_primary_flag = AsyncMock(return_value=True)
+    service._clear_other_primary_accounts = AsyncMock()
+    service._emit_audit = AsyncMock()
+
+    with caplog.at_level(logging.INFO, logger="virtual_account_mask_test"):
+        await service.create_virtual_account(
+            wallet_id=wallet_id,
+            user_id=user_id,
+            provider="flutterwave",
+            account_number=account_number,
+        )
+
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert account_number not in rendered
+    assert any(record.__dict__.get("account_number") == "******7890" for record in caplog.records)
 
 
 async def patch_redis(monkeypatch, redis_client: Any | None = None) -> None:

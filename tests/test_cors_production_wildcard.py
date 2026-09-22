@@ -39,6 +39,7 @@ def test_production_explicit_cors_and_trusted_hosts_are_allowed() -> None:
         database_url="postgresql+asyncpg://prod_user:StrongProdPass!@prod-db.example.com:5432/cosmozpay",
         redis_url="redis://prod-redis.internal:6379/0",
         jwt_secret_key="a-very-secure-production-secret-32+chars",
+        bank_account_encryption_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         cors_allow_origins=["https://admin.cosmozpay.com"],
         trusted_hosts=["admin.cosmozpay.com"],
     )
