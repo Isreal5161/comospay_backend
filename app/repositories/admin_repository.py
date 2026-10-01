@@ -32,6 +32,11 @@ class AdminRepository:
         result = await self.session.execute(select(Admin).where(Admin.email == email))
         return result.scalar_one_or_none()
 
+    async def get_by_username(self, username: str) -> Admin | None:
+        """Retrieve an admin by its stored username."""
+        result = await self.session.execute(select(Admin).where(Admin.username == username.strip()))
+        return result.scalar_one_or_none()
+
     async def get_all(
         self,
         *,

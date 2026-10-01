@@ -29,6 +29,7 @@ class AuthenticatedUser:
     expires_at: str | None = None
     issued_at: str | None = None
     subject: str | None = None
+    identity_type: str = "user"
 
     @classmethod
     def from_claims(cls, payload: dict[str, Any]) -> "AuthenticatedUser":
@@ -41,6 +42,7 @@ class AuthenticatedUser:
             expires_at=payload.get("exp"),
             issued_at=payload.get("iat"),
             subject=str(payload.get("sub") or ""),
+            identity_type=str(payload.get("identity_type") or "user"),
         )
 
 
@@ -70,7 +72,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Ensure token isn't revoked. TokenService exposes an async revocation check.
         try:
-            revoked = await token_service.check_revoked_token(token=token)
+            revoked = await token_service.check_revoked_token(
+                token=token,
+                fail_closed=claims.get("identity_type") == "admin",
+            )
         except Exception:
             # Conservatively deny access if revocation state cannot be confirmed.
             self._log_auth_failure(request, "Token revocation check failed.", "revocation_check_failure")
@@ -117,10 +122,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if token_type != "access":
             return False
 
+        identity_type = str(payload.get("identity_type") or "user")
+        if identity_type not in {"user", "admin"}:
+            return False
+
         user_id = payload.get("user_id") or payload.get("sub")
         email = payload.get("email")
         role = payload.get("role")
         expires_at = payload.get("exp")
+        if identity_type == "admin" and (
+            not payload.get("sub") or not payload.get("user_id") or str(payload.get("sub")) != str(payload.get("user_id"))
+        ):
+            return False
 
         if not user_id or not email or not role or not expires_at:
             return False
@@ -192,8 +205,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/health",
             "/healthz",
             "/auth/login",
+            "/auth/admin/login",
+            "/auth/admin/verify-mfa",
             "/auth/register",
             "/auth/refresh",
+            "/auth/admin/refresh",
             "/auth/forgot-password",
             "/auth/reset-password",
         ]

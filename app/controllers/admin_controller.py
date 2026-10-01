@@ -11,7 +11,7 @@ from app.schemas.admin_schema import AdminCreate, AdminUpdate
 from app.schemas.api_key_schema import APIKeyCreate, APIKeyRevokeSchema, APIKeyUpdate
 from app.schemas.audit_log_schema import AuditLogFilterSchema
 from app.schemas.kyc_schema import KYCApprovalSchema
-from app.utils.exceptions import AppException
+from app.utils.exceptions import AppException, AuthenticationException, AuthorizationException
 from app.utils.logger import get_logger, log_api_event
 from app.utils.response import success_response
 
@@ -131,6 +131,7 @@ class AdminController:
 
     def _register_routes(self) -> None:
         self.router.get("/dashboard", status_code=status.HTTP_200_OK)(self.get_dashboard)
+        self.router.get("/me", status_code=status.HTTP_200_OK)(self.get_me)
         self.router.get("/users", status_code=status.HTTP_200_OK)(self.list_users)
         self.router.get("/users/{user_id}", status_code=status.HTTP_200_OK)(self.get_user)
         self.router.post("/users/{user_id}/manage", status_code=status.HTTP_200_OK)(self.manage_user)
@@ -181,6 +182,23 @@ class AdminController:
             handler=self._resolve_handler("get_dashboard_stats"),
             payload={"admin_id": target_admin_id, **request_payload},
             success_message="Dashboard data retrieved successfully.",
+        )
+
+    async def get_me(self, request: Request | None = None) -> dict[str, Any]:
+        """Resolve and return the authoritative profile for the Admin JWT identity."""
+        auth_user = getattr(request.state, "auth_user", None) if request is not None else None
+        if auth_user is None or getattr(auth_user, "identity_type", "user") != "admin":
+            raise AuthorizationException(detail="An Admin identity is required.")
+        raw_admin_id = getattr(auth_user, "user_id", None)
+        try:
+            admin_id = UUID(str(raw_admin_id))
+        except (ValueError, TypeError) as exc:
+            raise AuthenticationException("Admin identity is invalid.") from exc
+        return await self._execute(
+            action="get_admin_profile",
+            handler=self._resolve_handler("get_admin_profile"),
+            payload={"admin_id": admin_id, "token_role": str(getattr(auth_user, "role", ""))},
+            success_message="Admin profile retrieved successfully.",
         )
 
     async def list_users(self, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:

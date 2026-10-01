@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from uuid import UUID
 
+from app.config.settings import settings
+from app.schemas.admin_schema import AdminResponse
+from app.utils.exceptions import AuthenticationException, DatabaseException
 from app.services.admin import (
     ApiKeyService,
     AuditService,
@@ -57,9 +61,11 @@ class AdminService:
         product_service: ProductAdministrationService,
         marketing_service: MarketingService,
         merchant_service: MerchantService,
+        admin_repository: Any = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.logger = logger or logging.getLogger(__name__)
+        self.admin_repository = admin_repository
         self.dashboard_service = dashboard_service
         self.user_service = user_service
         self.kyc_service = kyc_service
@@ -82,6 +88,27 @@ class AdminService:
         self.product_service = product_service
         self.marketing_service = marketing_service
         self.merchant_service = merchant_service
+
+    async def get_admin_profile(self, *, admin_id: UUID, token_role: str) -> dict[str, Any]:
+        """Return the safe profile for the authenticated, currently active Admin."""
+        if self.admin_repository is None:
+            raise DatabaseException("Admin profile service is unavailable.")
+        admin = await self.admin_repository.get_by_id(admin_id)
+        if admin is None or not bool(getattr(admin, "is_active", False)):
+            raise AuthenticationException("Admin account is unavailable.")
+        if str(getattr(admin, "status", "") or "").strip().lower() != "active":
+            raise AuthenticationException("Admin account is unavailable.")
+
+        normalize = lambda role: str(role).strip().lower().replace(" ", "_")
+        configured_roles = getattr(settings, "admin_allowed_roles", None)
+        if isinstance(configured_roles, str):
+            configured_roles = [item.strip() for item in configured_roles.split(",") if item.strip()]
+        allowed_roles = configured_roles or ["super_admin", "admin"]
+        current_role = normalize(getattr(admin, "role", ""))
+        if current_role != normalize(token_role) or current_role not in {normalize(role) for role in allowed_roles}:
+            raise AuthenticationException("Admin account is unavailable.")
+
+        return AdminResponse.model_validate(admin).model_dump(mode="json")
 
     async def get_dashboard_stats(self, **payload: Any) -> dict[str, Any]:
         return await self.dashboard_service.get_stats(**payload)

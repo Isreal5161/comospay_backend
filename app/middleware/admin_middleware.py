@@ -29,6 +29,10 @@ class AdminMiddleware(BaseHTTPMiddleware):
             self._log_authorization_failure(request, "Missing authenticated user context.", "missing_user")
             return self._forbidden_response(request, "Access denied.")
 
+        if getattr(user, "identity_type", "user") != "admin":
+            self._log_authorization_failure(request, "An Admin identity is required.", "identity_type_denied")
+            return self._forbidden_response(request, "You are not authorized to access this resource.")
+
         role = self._extract_role(user)
         if not self._is_authorized(role):
             self._log_authorization_failure(request, f"Role '{role}' is not authorized.", "role_denied")

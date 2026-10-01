@@ -24,6 +24,7 @@ from app.config.security import (
     verify_password,
     verify_pin,
 )
+from app.models.admin import Admin
 from app.models.device import Device
 from app.models.otp import OTP
 from app.models.user import User
@@ -48,6 +49,7 @@ from app.services.auth.session_service import (
     SessionService,
 )
 from app.services.auth.token_service import TokenService
+from app.schemas.admin_schema import AdminResponse
 from app.utils.exceptions import (
     AuthenticationException,
     DatabaseException,
@@ -135,6 +137,7 @@ class AuthService:
         self,
         *,
         user_repository: Any = None,
+        admin_repository: Any = None,
         wallet_repository: Any = None,
         otp_repository: Any = None,
         device_repository: Any = None,
@@ -145,6 +148,7 @@ class AuthService:
         notification_service: Any = None,
         password_service: Any = None,
         otp_service: Any = None,
+        admin_otp_service: Any = None,
         token_service: Any = None,
         session_service: Any = None,
         device_service: Any = None,
@@ -152,6 +156,7 @@ class AuthService:
         logger: logging.Logger | None = None,
     ) -> None:
         self.user_repository = user_repository
+        self.admin_repository = admin_repository
         self.wallet_repository = wallet_repository
         self.otp_repository = otp_repository
         self.device_repository = device_repository
@@ -160,6 +165,7 @@ class AuthService:
         self.password_utils = password_utils or _DefaultPasswordUtils()
         self.password_service = password_service
         self.otp_service = otp_service
+        self.admin_otp_service = admin_otp_service
         self.token_service = token_service
         self.session_service = session_service
         self.device_service = device_service
@@ -444,6 +450,323 @@ class AuthService:
         except Exception as exc:
             raise DatabaseException("Login failed.") from exc
 
+    async def admin_login(self, *, login_identifier: str, password: str) -> dict[str, Any]:
+        """Authenticate a separate Admin identity and issue admin-scoped tokens."""
+        if self.admin_repository is None:
+            raise DatabaseException("Admin authentication is unavailable.")
+        identifier = login_identifier.strip()
+        admin = await self.admin_repository.get_by_email(identifier.lower()) if "@" in identifier else None
+        if admin is None:
+            admin = await self.admin_repository.get_by_username(identifier)
+
+        if admin is None or not self._verify_admin_password(password, getattr(admin, "password_hash", None)):
+            if admin is not None:
+                await self._record_admin_login_failure(admin)
+            raise AuthenticationException("Invalid credentials.")
+
+        if not self._admin_can_authenticate(admin):
+            raise AuthenticationException("Invalid credentials.")
+
+        if not self._is_allowed_admin_role(getattr(admin, "role", "")):
+            raise AuthenticationException("Invalid credentials.")
+
+        if bool(getattr(admin, "mfa_enabled", False)):
+            otp_service = self.admin_otp_service or self.otp_service
+            if otp_service is None:
+                raise DatabaseException("Admin verification is unavailable.")
+            try:
+                challenge = await otp_service.send_otp(
+                    recipient=admin.email,
+                    purpose="login_verification",
+                    channel="email",
+                    user_id=str(admin.id),
+                    metadata={"identity_type": "admin", "admin_id": str(admin.id)},
+                    delivery_context={"subject": "Verify your CosmozPay admin login", "template_name": "mfa_login"},
+                )
+            except Exception as exc:
+                raise DatabaseException("Admin verification could not be started.") from exc
+            return {
+                "requires_mfa": True,
+                "message": "Multi-factor verification is required.",
+                "reference_id": challenge["reference_id"],
+            }
+
+        return await self._complete_admin_login(admin)
+
+    async def verify_admin_mfa(self, *, reference_id: str, otp_code: str) -> dict[str, Any]:
+        """Complete an Admin email-OTP challenge and issue Admin-scoped tokens."""
+        otp_service = self.admin_otp_service or self.otp_service
+        if otp_service is None or self.admin_repository is None:
+            raise DatabaseException("Admin verification is unavailable.")
+        try:
+            result = await otp_service.verify_otp(
+                reference_id=reference_id,
+                otp_code=otp_code,
+                purpose="login_verification",
+                expected_metadata={"identity_type": "admin"},
+                include_context=True,
+            )
+        except (AuthenticationException, ValidationException):
+            raise
+        except Exception as exc:
+            raise DatabaseException("Admin verification failed.") from exc
+
+        metadata = result.get("metadata")
+        if result.get("purpose") != "login_verification" or not isinstance(metadata, dict):
+            raise AuthenticationException("Admin verification is invalid.")
+        if metadata.get("identity_type") != "admin":
+            raise AuthenticationException("Admin verification is invalid.")
+
+        raw_admin_id = result.get("user_id")
+        try:
+            admin_id = UUID(str(raw_admin_id))
+        except (ValueError, TypeError) as exc:
+            raise AuthenticationException("Admin verification is invalid.") from exc
+        if metadata.get("admin_id") != str(admin_id):
+            raise AuthenticationException("Admin verification is invalid.")
+
+        admin = await self.admin_repository.get_by_id(admin_id)
+        if admin is None or not self._admin_can_authenticate(admin):
+            raise AuthenticationException("Admin account is unavailable.")
+        if not self._is_allowed_admin_role(getattr(admin, "role", "")):
+            raise AuthenticationException("Admin account is unavailable.")
+        return await self._complete_admin_login(admin)
+
+    async def refresh_admin_token(self, *, refresh_token: str) -> dict[str, Any]:
+        """Validate and rotate a refresh token without resolving it as a User."""
+        if self.admin_repository is None or self.token_service is None:
+            raise DatabaseException("Admin token refresh is unavailable.")
+        try:
+            claims = self.token_service.validate_token(refresh_token, expected_type="refresh")
+        except (AuthenticationException, ValidationException, ValueError) as exc:
+            raise AuthenticationException("Admin refresh token is invalid.") from exc
+
+        if claims.get("identity_type") != "admin":
+            raise AuthenticationException("Admin refresh token is invalid.")
+        if not claims.get("jti") or not (claims.get("family_id") or claims.get("token_family_id")):
+            raise AuthenticationException("Admin refresh token is invalid.")
+        subject = str(claims.get("sub") or "")
+        if not subject or str(claims.get("user_id") or "") != subject:
+            raise AuthenticationException("Admin refresh token is invalid.")
+        try:
+            admin_id = UUID(subject)
+        except ValueError as exc:
+            raise AuthenticationException("Admin refresh token is invalid.") from exc
+
+        try:
+            if await self.token_service.check_revoked_token(token=refresh_token, fail_closed=True):
+                raise AuthenticationException("Admin refresh token has been revoked.")
+            family_id = str(claims.get("family_id") or claims.get("token_family_id"))
+            if await self.token_service.check_revoked_token_family(family_id):
+                raise AuthenticationException("Admin refresh token family has been revoked.")
+        except AuthenticationException:
+            raise
+        except Exception as exc:
+            raise DatabaseException("Admin token state could not be verified.") from exc
+
+        admin = await self.admin_repository.get_by_id(admin_id)
+        if admin is None or not self._admin_can_authenticate(admin):
+            raise AuthenticationException("Admin account is unavailable.")
+        if not self._is_allowed_admin_role(getattr(admin, "role", "")):
+            raise AuthenticationException("Admin account is unavailable.")
+
+        session_id = claims.get("session_id")
+        if not session_id or self.session_service is None:
+            raise AuthenticationException("Admin session is invalid.")
+        try:
+            session = await self.session_service.validate_session(session_id=str(session_id))
+        except Exception as exc:
+            raise AuthenticationException("Admin session is invalid.") from exc
+        if str(session.get("user_id") or "") != str(admin.id):
+            raise AuthenticationException("Admin session is invalid.")
+        if str(session.get("refresh_token_family_id") or "") != family_id:
+            raise AuthenticationException("Admin session is invalid.")
+
+        extra_claims = self._admin_token_claims(admin, family_id=family_id)
+        access_token = self.token_service.create_access_token(
+            str(admin.id), extra_claims=extra_claims, session_id=str(session_id)
+        )
+        rotation_enabled = bool(getattr(settings, "refresh_token_rotation_enabled", True))
+        if rotation_enabled:
+            try:
+                rotation = await self.token_service.rotate_refresh_token(
+                    refresh_token,
+                    subject=str(admin.id),
+                    session_id=str(session_id),
+                    family_id=family_id,
+                    extra_claims=self._admin_token_claims(admin),
+                    require_revocation=True,
+                )
+            except AuthenticationException:
+                raise
+            except Exception as exc:
+                raise DatabaseException("Admin token rotation could not be completed.") from exc
+            new_refresh_token = rotation["refresh_token"]
+        else:
+            try:
+                revoked = await self.token_service.revoke_token(refresh_token, reason="rotated")
+                if not revoked.get("revoked"):
+                    raise RuntimeError("Refresh token revocation could not be confirmed.")
+                new_refresh_token = self.token_service.create_refresh_token(
+                    str(admin.id),
+                    extra_claims=self._admin_token_claims(admin),
+                    session_id=str(session_id),
+                    family_id=family_id,
+                )
+            except Exception as exc:
+                raise DatabaseException("Admin token rotation could not be completed.") from exc
+
+        return {
+            "access_token": access_token,
+            "refresh_token": new_refresh_token,
+            "token_type": "bearer",
+            "expires_in": settings.access_token_expire_minutes * 60,
+            "session_id": str(session_id),
+        }
+
+    async def logout_admin(self, *, access_token: str, refresh_token: str) -> dict[str, Any]:
+        """Revoke an Admin access token, refresh token family, and associated session."""
+        if self.token_service is None:
+            raise DatabaseException("Admin logout is unavailable.")
+        try:
+            access_claims = self.token_service.validate_token(access_token, expected_type="access")
+            refresh_claims = self.token_service.validate_token(refresh_token, expected_type="refresh")
+        except (AuthenticationException, ValidationException, ValueError) as exc:
+            raise AuthenticationException("Admin logout credentials are invalid.") from exc
+
+        subject = str(access_claims.get("sub") or "")
+        refresh_subject = str(refresh_claims.get("sub") or "")
+        family_id = str(refresh_claims.get("family_id") or refresh_claims.get("token_family_id") or "")
+        if (
+            access_claims.get("identity_type") != "admin"
+            or refresh_claims.get("identity_type") != "admin"
+            or not subject
+            or subject != refresh_subject
+            or str(access_claims.get("user_id") or "") != subject
+            or str(refresh_claims.get("user_id") or "") != subject
+            or not family_id
+            or (access_claims.get("family_id") and access_claims.get("family_id") != family_id)
+            or (access_claims.get("session_id") and access_claims.get("session_id") != refresh_claims.get("session_id"))
+        ):
+            raise AuthenticationException("Admin logout credentials are invalid.")
+
+        try:
+            for token in (access_token, refresh_token):
+                result = await self.token_service.revoke_token(token, reason="admin_logout")
+                if not result.get("revoked"):
+                    raise RuntimeError("Token revocation could not be confirmed.")
+            await self.token_service.revoke_token_family(
+                family_id,
+                ttl_seconds=settings.refresh_token_expire_days * 24 * 60 * 60,
+            )
+            session_id = refresh_claims.get("session_id")
+            if session_id and self.session_service is not None:
+                await self.session_service.revoke_session(session_id=str(session_id), reason="admin_logout")
+        except Exception as exc:
+            raise DatabaseException("Admin logout could not be completed.") from exc
+
+        await self._log_event("admin_logged_out", user_id=UUID(subject), metadata={"session_id": refresh_claims.get("session_id")})
+        return {"message": "Logged out successfully."}
+
+    async def _complete_admin_login(self, admin: Admin) -> dict[str, Any]:
+        if self.token_service is None or self.session_service is None:
+            raise DatabaseException("Admin authentication is unavailable.")
+        now = datetime.now(timezone.utc)
+        try:
+            admin = await self.admin_repository.update(
+                admin,
+                failed_login_attempts=0,
+                locked_until=None,
+                last_login_at=now,
+            )
+            family_id = self.token_service.generate_token_family_id()
+            session = await self.session_service.create_session(
+                user_id=str(admin.id),
+                refresh_token_family_id=family_id,
+                metadata={"identity_type": "admin", "login_method": "password"},
+            )
+            session_id = str(session["session_id"])
+            claims = self._admin_token_claims(admin, family_id=family_id)
+            access_token = self.token_service.create_access_token(
+                str(admin.id), extra_claims=claims, session_id=session_id
+            )
+            refresh_token = self.token_service.create_refresh_token(
+                str(admin.id),
+                extra_claims=self._admin_token_claims(admin),
+                session_id=session_id,
+                family_id=family_id,
+            )
+        except Exception as exc:
+            raise DatabaseException("Admin login could not be completed.") from exc
+
+        return {
+            "admin": self._serialize_admin(admin),
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "expires_in": settings.access_token_expire_minutes * 60,
+            "session_id": session_id,
+        }
+
+    def _verify_admin_password(self, password: str, password_hash: str | None) -> bool:
+        verifier = self.password_service or self.password_utils
+        try:
+            return bool(password and password_hash and verifier.verify_password(password, password_hash))
+        except Exception:
+            return False
+
+    async def _record_admin_login_failure(self, admin: Admin) -> None:
+        attempts = int(getattr(admin, "failed_login_attempts", 0) or 0) + 1
+        lock_until = None
+        if attempts >= settings.max_login_attempts:
+            lock_until = datetime.now(timezone.utc) + timedelta(minutes=settings.account_lock_duration_minutes)
+        try:
+            await self.admin_repository.update(
+                admin,
+                failed_login_attempts=attempts,
+                locked_until=lock_until,
+            )
+        except Exception as exc:
+            raise DatabaseException("Admin login could not be completed.") from exc
+
+    def _admin_can_authenticate(self, admin: Admin) -> bool:
+        status_value = str(getattr(admin, "status", "") or "").strip().lower()
+        if not bool(getattr(admin, "is_active", False)) or status_value != "active":
+            return False
+        locked_until = getattr(admin, "locked_until", None)
+        if locked_until is not None:
+            if locked_until.tzinfo is None:
+                locked_until = locked_until.replace(tzinfo=timezone.utc)
+            if locked_until > datetime.now(timezone.utc):
+                return False
+        return True
+
+    def _is_allowed_admin_role(self, role: str) -> bool:
+        configured = getattr(settings, "admin_allowed_roles", None)
+        if isinstance(configured, str):
+            configured = [item.strip() for item in configured.split(",") if item.strip()]
+        allowed = configured or ["super_admin", "admin"]
+        normalized_allowed = {self._normalize_admin_role(str(item)) for item in allowed}
+        return self._normalize_admin_role(role) in normalized_allowed
+
+    @staticmethod
+    def _normalize_admin_role(role: str) -> str:
+        return role.strip().lower().replace(" ", "_")
+
+    def _admin_token_claims(self, admin: Admin, *, family_id: str | None = None) -> dict[str, Any]:
+        claims = {
+            "identity_type": "admin",
+            "user_id": str(admin.id),
+            "email": admin.email,
+            "role": self._normalize_admin_role(admin.role),
+        }
+        if family_id:
+            claims["family_id"] = family_id
+        return claims
+
+    def _serialize_admin(self, admin: Admin) -> dict[str, Any]:
+        return AdminResponse.model_validate(admin).model_dump(mode="json")
+
     async def refresh_token(self, *, refresh_token: str) -> dict[str, Any]:
         """Issue a new access token and optionally rotate the refresh token."""
         self._require_session()
@@ -459,6 +782,9 @@ class AuthService:
                 claims = self.jwt_utils.decode_token(refresh_token)
         except (AuthenticationException, ValidationException, ValueError) as exc:
             raise AuthenticationException("Refresh token is invalid.") from exc
+
+        if claims.get("identity_type", "user") != "user":
+            raise AuthenticationException("Refresh token is invalid.")
 
         if claims.get("type") != "refresh":
             raise AuthenticationException("Refresh token is invalid.")

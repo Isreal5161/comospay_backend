@@ -161,7 +161,16 @@ class OTPService:
             "delivery": delivery_result,
         }
 
-    async def verify_otp(self, *, reference_id: str, otp_code: str, purpose: str | None = None, user_id: str | None = None) -> dict[str, Any]:
+    async def verify_otp(
+        self,
+        *,
+        reference_id: str,
+        otp_code: str,
+        purpose: str | None = None,
+        user_id: str | None = None,
+        expected_metadata: Mapping[str, Any] | None = None,
+        include_context: bool = False,
+    ) -> dict[str, Any]:
         """Verify an OTP and invalidate it immediately after successful use."""
         if not reference_id:
             raise InvalidOtpException(detail="A reference identifier is required.")
@@ -179,6 +188,16 @@ class OTPService:
         payload = json.loads(payload_raw)
         if payload.get("used"):
             raise OtpAlreadyUsedException()
+
+        if user_id is not None and payload.get("user_id") != user_id:
+            raise InvalidOtpException()
+
+        stored_metadata = payload.get("metadata")
+        if expected_metadata and (
+            not isinstance(stored_metadata, dict)
+            or any(stored_metadata.get(key) != value for key, value in expected_metadata.items())
+        ):
+            raise InvalidOtpException()
 
         if purpose and payload.get("purpose") != purpose:
             raise UnsupportedOtpTypeException(detail="OTP purpose does not match the requested context.")
@@ -202,7 +221,11 @@ class OTPService:
         await redis_client.set(self._otp_key(reference_id), json.dumps(payload), ex=60)
         await redis_client.delete(self._otp_key(reference_id))
         log_security_event(self.logger, "OTP verified", reference_id=reference_id, user_id=user_id, purpose=payload.get("purpose"))
-        return {"verified": True, "reference_id": reference_id, "purpose": payload.get("purpose")}
+        result = {"verified": True, "reference_id": reference_id, "purpose": payload.get("purpose")}
+        if include_context:
+            result["user_id"] = payload.get("user_id")
+            result["metadata"] = payload.get("metadata", {})
+        return result
 
     async def resend_otp(self, *, reference_id: str, purpose: str | None = None, user_id: str | None = None) -> dict[str, Any]:
         """Invalidate the previous OTP and issue a new one after applying resend safeguards."""

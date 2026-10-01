@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.database import get_db
 from app.controllers.auth_controller import (
     AuthController,
+    AdminLogoutRequest,
+    AdminMfaVerificationRequest,
     ChangePasswordRequest,
     DeviceVerificationRequest,
     EmailVerificationRequest,
@@ -22,9 +24,11 @@ from app.controllers.auth_controller import (
     TokenRefreshRequest,
 )
 from app.repositories.device_repository import DeviceRepository
+from app.repositories.admin_repository import AdminRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
 from app.repositories.transaction_repository import TransactionRepository
+from app.schemas.admin_schema import AdminLoginSchema
 from app.services.auth.device_service import DeviceService
 from app.services.auth.otp_service import OTPService
 from app.services.auth.password_service import PasswordService
@@ -46,11 +50,16 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 async def get_auth_service(session: AsyncSession = Depends(get_db)) -> AuthService:
     """Compose the auth service graph per request using the active database session."""
     user_repository = UserRepository(session=session)
+    admin_repository = AdminRepository(session=session)
     wallet_repository = WalletRepository(session=session)
     device_repository = DeviceRepository(session=session)
 
+    from app.services.notification_service import build_notification_service
+
+    notification_service = build_notification_service(session=session, redis_client=None)
     password_service = PasswordService()
     otp_service = OTPService(redis_client=None, notification_service=None)
+    admin_otp_service = OTPService(redis_client=None, notification_service=notification_service)
     token_service = TokenService()
     session_service = SessionService()
     # auth/device service uses an auth-specific Redis-backed device service
@@ -59,7 +68,6 @@ async def get_auth_service(session: AsyncSession = Depends(get_db)) -> AuthServi
     # Compose a minimal request-scoped wallet facade from concrete internal services
     transaction_repository = TransactionRepository(session=session)
     from app.repositories.virtual_account_repository import VirtualAccountRepository
-    from app.services.notification_service import build_notification_service
     from app.services.virtual_account_service import VirtualAccountService
     from app.integrations.payments.flutterwave.client import FlutterwaveClient
     from app.integrations.payments.flutterwave.virtual_accounts import FlutterwaveVirtualAccountService
@@ -74,7 +82,7 @@ async def get_auth_service(session: AsyncSession = Depends(get_db)) -> AuthServi
         wallet_repository=wallet_repository,
         user_repository=user_repository,
         provider_services=provider_map,
-        notification_service=build_notification_service(session=session, redis_client=None),
+        notification_service=notification_service,
         session=session,
     )
 
@@ -105,17 +113,19 @@ async def get_auth_service(session: AsyncSession = Depends(get_db)) -> AuthServi
 
     return AuthService(
         user_repository=user_repository,
+        admin_repository=admin_repository,
         wallet_repository=wallet_repository,
         otp_repository=None,
         device_repository=device_repository,
         session=session,
         password_service=password_service,
         otp_service=otp_service,
+        admin_otp_service=admin_otp_service,
         token_service=token_service,
         session_service=session_service,
         device_service=device_service,
         wallet_service=wallet_service,
-        notification_service=build_notification_service(session=session, redis_client=None),
+        notification_service=notification_service,
     )
 
 
@@ -132,6 +142,26 @@ async def register(payload: RegisterRequest, controller: AuthController = Depend
 @router.post("/login", status_code=status.HTTP_200_OK)
 async def login(payload: LoginRequest, controller: AuthController = Depends(get_auth_controller)) -> dict[str, Any]:
     return await controller.login(payload)
+
+
+@router.post("/admin/login", status_code=status.HTTP_200_OK)
+async def admin_login(payload: AdminLoginSchema, controller: AuthController = Depends(get_auth_controller)) -> dict[str, Any]:
+    return await controller.admin_login(payload)
+
+
+@router.post("/admin/verify-mfa", status_code=status.HTTP_200_OK)
+async def verify_admin_mfa(payload: AdminMfaVerificationRequest, controller: AuthController = Depends(get_auth_controller)) -> dict[str, Any]:
+    return await controller.verify_admin_mfa(payload)
+
+
+@router.post("/admin/refresh", status_code=status.HTTP_200_OK)
+async def refresh_admin_token(payload: TokenRefreshRequest, controller: AuthController = Depends(get_auth_controller)) -> dict[str, Any]:
+    return await controller.refresh_admin_token(payload)
+
+
+@router.post("/admin/logout", status_code=status.HTTP_200_OK)
+async def logout_admin(payload: AdminLogoutRequest, request: Request, controller: AuthController = Depends(get_auth_controller)) -> dict[str, Any]:
+    return await controller.logout_admin(payload, request=request)
 
 
 @router.post("/refresh", status_code=status.HTTP_200_OK)

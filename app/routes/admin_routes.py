@@ -167,6 +167,7 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
     )
 
     return AdminService(
+        admin_repository=admin_repository,
         dashboard_service=DashboardService(
             logger=logger,
             user_repository=user_repository,
@@ -304,6 +305,14 @@ async def get_dashboard(
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
     return await controller.get_dashboard(payload, request=request)
+
+
+@router.get("/me", status_code=status.HTTP_200_OK)
+async def get_current_admin(
+    request: Request,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_me(request=request)
 
 
 @router.get("/users", status_code=status.HTTP_200_OK)

@@ -198,7 +198,13 @@ class TokenService:
         log_security_event(self.logger, "Token revoked", jti=jti, token_type=token_type, reason=reason or "revoked")
         return {"revoked": True, "jti": jti, "reason": reason or "revoked"}
 
-    async def check_revoked_token(self, token: str | None = None, *, jti: str | None = None) -> bool:
+    async def check_revoked_token(
+        self,
+        token: str | None = None,
+        *,
+        jti: str | None = None,
+        fail_closed: bool = False,
+    ) -> bool:
         """Return True if the supplied token or JWT ID has been revoked."""
         if not jti and token:
             claims = self.validate_token(token)
@@ -208,9 +214,29 @@ class TokenService:
 
         redis_client = await self._get_redis_client()
         if redis_client is None:
+            if fail_closed:
+                raise RuntimeError("Redis is required to verify token revocation state.")
             return False
 
         return bool(await redis_client.exists(self._revocation_key(jti)))
+
+    async def revoke_token_family(self, family_id: str, *, ttl_seconds: int) -> None:
+        """Mark a refresh-token family revoked using the shared Redis state."""
+        if not family_id:
+            raise ValidationException("A refresh-token family is required.")
+        redis_client = await self._get_redis_client()
+        if redis_client is None:
+            raise RuntimeError("Redis is required to revoke a refresh-token family.")
+        await redis_client.setex(f"auth:family_revoked:{family_id}", max(ttl_seconds, 60), "1")
+
+    async def check_revoked_token_family(self, family_id: str) -> bool:
+        """Check the shared refresh-family revocation marker, failing closed without Redis."""
+        if not family_id:
+            raise ValidationException("A refresh-token family is required.")
+        redis_client = await self._get_redis_client()
+        if redis_client is None:
+            raise RuntimeError("Redis is required to verify refresh-token family state.")
+        return bool(await redis_client.exists(f"auth:family_revoked:{family_id}"))
 
     async def rotate_refresh_token(
         self,
@@ -220,10 +246,14 @@ class TokenService:
         device_id: str | None = None,
         session_id: str | None = None,
         family_id: str | None = None,
+        extra_claims: Mapping[str, Any] | None = None,
+        require_revocation: bool = False,
     ) -> dict[str, Any]:
         """Rotate a refresh token by revoking the old token and issuing a new one."""
         claims = self.validate_token(refresh_token, expected_type="refresh")
         redis_client = await self._get_redis_client()
+        if require_revocation and redis_client is None:
+            raise RuntimeError("Redis is required to rotate refresh tokens safely.")
         lock_key = self._rotation_lock_key(str(claims.get("jti") or ""))
         lock_acquired = False
         try:
@@ -232,17 +262,24 @@ class TokenService:
                 if not lock_acquired:
                     raise AuthenticationException(detail="Refresh token has been revoked.", error_code="TOKEN_REVOKED")
 
-            if await self.check_revoked_token(token=refresh_token):
+            if await self.check_revoked_token(token=refresh_token, fail_closed=require_revocation):
                 raise AuthenticationException(detail="Refresh token has been revoked.", error_code="TOKEN_REVOKED")
+
+            current_family_id = str(claims.get("family_id") or claims.get("token_family_id") or "")
+            if require_revocation and current_family_id and await self.check_revoked_token_family(current_family_id):
+                raise AuthenticationException(detail="Refresh token family has been revoked.", error_code="TOKEN_REVOKED")
 
             new_family_id = family_id or str(claims.get("family_id") or claims.get("token_family_id") or self.generate_token_family_id())
             new_token = self.create_refresh_token(
                 subject=subject or str(claims.get("sub") or ""),
+                extra_claims=extra_claims,
                 device_id=device_id or claims.get("device_id"),
                 session_id=session_id or claims.get("session_id"),
                 family_id=new_family_id,
             )
-            await self.revoke_token(refresh_token, reason="rotated")
+            revoke_result = await self.revoke_token(refresh_token, reason="rotated")
+            if require_revocation and not revoke_result.get("revoked"):
+                raise RuntimeError("Refresh token revocation could not be confirmed.")
 
             if redis_client is not None:
                 family_key = self._family_key(new_family_id)

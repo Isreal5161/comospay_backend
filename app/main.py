@@ -71,13 +71,13 @@ def create_app() -> FastAPI:
         allowed_hosts=_get_trusted_hosts(),
     )
     app.add_middleware(RateLimitMiddleware)
-    app.add_middleware(AuthMiddleware, public_paths=_get_public_paths())
     # Admin allowed roles may be configured via settings.ADMIN_ALLOWED_ROLES (comma-separated or list).
     configured_roles = getattr(settings, "admin_allowed_roles", None)
     if isinstance(configured_roles, str):
         configured_roles = [r.strip() for r in configured_roles.split(",") if r.strip()]
     allowed_roles = configured_roles or ["super_admin", "admin"]
     app.add_middleware(AdminMiddleware, allowed_roles=allowed_roles)
+    app.add_middleware(AuthMiddleware, public_paths=_get_public_paths())
     app.add_middleware(AuditMiddleware)
 
     if _HAS_PROXY_HEADERS_MIDDLEWARE:
@@ -234,8 +234,11 @@ def _get_public_paths() -> list[str]:
             "/redoc",
             "/health",
             "/healthz",
+            "/auth/admin/login",
+            "/auth/admin/verify-mfa",
             "/",
             "/auth/login",
+            "/auth/admin/refresh",
             "/auth/register",
             "/auth/refresh",
         ]

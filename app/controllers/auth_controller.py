@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 
+from app.schemas.admin_schema import AdminLoginSchema
 from app.schemas.user_schema import UserCreate, UserLoginSchema
 from app.services.auth_service import AuthService
 from app.utils.exceptions import AppException
@@ -43,6 +44,19 @@ class LogoutRequest(BaseModel):
 
     access_token: str | None = Field(default=None, description="Access token to revoke.")
     refresh_token: str | None = Field(default=None, description="Refresh token to revoke.")
+
+
+class AdminMfaVerificationRequest(BaseModel):
+    """Request schema for completing an Admin login MFA challenge."""
+
+    reference_id: str = Field(..., min_length=1, max_length=200)
+    otp_code: str = Field(..., min_length=1, max_length=32)
+
+
+class AdminLogoutRequest(BaseModel):
+    """Request schema for revoking an Admin session and its refresh token."""
+
+    refresh_token: str = Field(..., min_length=1)
 
 
 class EmailVerificationRequest(BaseModel):
@@ -108,6 +122,10 @@ class AuthController:
     def _register_routes(self) -> None:
         self.router.post("/register", status_code=status.HTTP_201_CREATED)(self.register)
         self.router.post("/login", status_code=status.HTTP_200_OK)(self.login)
+        self.router.post("/admin/login", status_code=status.HTTP_200_OK)(self.admin_login)
+        self.router.post("/admin/verify-mfa", status_code=status.HTTP_200_OK)(self.verify_admin_mfa)
+        self.router.post("/admin/refresh", status_code=status.HTTP_200_OK)(self.refresh_admin_token)
+        self.router.post("/admin/logout", status_code=status.HTTP_200_OK)(self.logout_admin)
         self.router.post("/refresh", status_code=status.HTTP_200_OK)(self.refresh_token)
         self.router.post("/logout", status_code=status.HTTP_200_OK)(self.logout)
         self.router.post("/verify-email", status_code=status.HTTP_200_OK)(self.verify_email)
@@ -160,6 +178,42 @@ class AuthController:
             success_message="Login successful.",
         )
         return result
+
+    async def admin_login(self, payload: AdminLoginSchema) -> dict[str, Any]:
+        return await self._execute(
+            action="admin_login",
+            handler=self.auth_service.admin_login,
+            payload={"login_identifier": payload.login_identifier, "password": payload.password},
+            success_message="Admin login successful.",
+        )
+
+    async def verify_admin_mfa(self, payload: AdminMfaVerificationRequest) -> dict[str, Any]:
+        return await self._execute(
+            action="admin_verify_mfa",
+            handler=self.auth_service.verify_admin_mfa,
+            payload={"reference_id": payload.reference_id, "otp_code": payload.otp_code},
+            success_message="Admin verification successful.",
+        )
+
+    async def refresh_admin_token(self, payload: TokenRefreshRequest) -> dict[str, Any]:
+        return await self._execute(
+            action="admin_refresh_token",
+            handler=self.auth_service.refresh_admin_token,
+            payload={"refresh_token": payload.refresh_token},
+            success_message="Admin token refreshed successfully.",
+        )
+
+    async def logout_admin(self, payload: AdminLogoutRequest, request: Request) -> dict[str, Any]:
+        authorization = request.headers.get("authorization", "")
+        parts = authorization.split(" ", 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication token is required.")
+        return await self._execute(
+            action="admin_logout",
+            handler=self.auth_service.logout_admin,
+            payload={"access_token": parts[1].strip(), "refresh_token": payload.refresh_token},
+            success_message="Logged out successfully.",
+        )
 
     async def refresh_token(self, payload: TokenRefreshRequest) -> dict[str, Any]:
         """Handle refresh token requests."""
