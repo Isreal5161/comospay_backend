@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import re
+import traceback
 from typing import Awaitable, Callable
 
 from fastapi import Request, Response
@@ -13,6 +16,14 @@ from app.utils.response import error_response
 
 
 logger = get_logger("api")
+
+_SENSITIVE_VALUE_PATTERN = re.compile(
+    r"(?i)\b(password|passwd|access[_ -]?token|refresh[_ -]?token|token|"
+    r"authorization|cookie|database[_ -]?url|redis[_ -]?url|jwt[_ -]?secret(?:[_ -]?key)?|"
+    r"api[_ -]?key|smtp[_ -]?password|secret)\b(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+_URI_CREDENTIAL_PATTERN = re.compile(r"(?i)(://[^:/\s]+:)[^@/\s]+@")
+_BEARER_CREDENTIAL_PATTERN = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*")
 
 
 class ErrorHandlingMiddleware(BaseHTTPMiddleware):
@@ -66,19 +77,31 @@ class ErrorHandlingMiddleware(BaseHTTPMiddleware):
 
     def _log_exception(self, request: Request, exc: Exception, status_code: int) -> None:
         """Log exception details safely without exposing sensitive data."""
-        try:
-            logger.exception(
-                "request_error",
-                extra={
+        exception_message = self._redact_sensitive_text(str(exc))
+        formatted_traceback = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        logger.exception(
+            "request_error %s",
+            json.dumps(
+                {
                     "request_id": getattr(request.state, "request_id", None),
                     "method": request.method,
                     "path": request.url.path,
                     "status_code": status_code,
                     "error_type": type(exc).__name__,
-                },
-            )
-        except Exception:
-            pass
+                    "exception_message": exception_message,
+                    "traceback": self._redact_sensitive_text(formatted_traceback),
+                }
+            ),
+        )
+
+    @staticmethod
+    def _redact_sensitive_text(value: str) -> str:
+        """Redact common credential forms from exception text before logging."""
+        value = _SENSITIVE_VALUE_PATTERN.sub(r"\1\2[REDACTED]", value)
+        value = _URI_CREDENTIAL_PATTERN.sub(r"\1[REDACTED]@", value)
+        return _BEARER_CREDENTIAL_PATTERN.sub(r"\1[REDACTED]", value)
 
     @staticmethod
     def _json_dumps(payload: dict) -> str:
