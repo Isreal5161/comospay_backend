@@ -92,205 +92,239 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 
 async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminService:
     """Compose the admin service graph per request using the active database session."""
-    logger = None
-    session_service = SessionService(logger=logger)
-    password_service = PasswordService(logger=logger)
-    admin_repository = AdminRepository(session=session)
-    audit_repository = AuditLogRepository(session=session)
-    settings_repository = SystemSettingsRepository(session=session)
-    provider_repository = ProviderRepository(session=session)
-    provider_selector = ProviderSelector(provider_repository=provider_repository)
-    provider_health_service = ProviderHealthService(provider_repository=provider_repository)
-    notification_repository = NotificationRepository(session=session)
-    user_repository = UserRepository(session=session)
-    kyc_repository = KYCRepository(session=session)
-    transaction_repository = TransactionRepository(session=session)
-    wallet_repository = WalletRepository(session=session)
-    notification_service = build_notification_service(session=session)
-    api_key_repository = APIKeyRepository(session=session)
-    ledger_repository = None
-    ledger_service = None
-    ledger_repository_module = importlib.import_module("app.repositories.ledger_repository")
-    ledger_service_module = importlib.import_module("app.services.ledger_service")
-    ledger_repository_cls = getattr(ledger_repository_module, "LedgerRepository", None)
-    ledger_service_cls = getattr(ledger_service_module, "LedgerService", None)
-    if ledger_repository_cls is not None and ledger_service_cls is not None:
-        ledger_repository = ledger_repository_cls(session=session)
-        ledger_service = ledger_service_cls(
-            ledger_repository=ledger_repository,
+    logger = get_logger("api")
+    stage = "admin_factory_start"
+    try:
+        logger.info("admin_factory_start")
+        session_service = SessionService(logger=logger)
+        password_service = PasswordService(logger=logger)
+        stage = "admin_factory_repositories_created"
+        logger.info("admin_factory_repositories_created")
+        admin_repository = AdminRepository(session=session)
+        audit_repository = AuditLogRepository(session=session)
+        settings_repository = SystemSettingsRepository(session=session)
+        provider_repository = ProviderRepository(session=session)
+        provider_selector = ProviderSelector(provider_repository=provider_repository)
+        provider_health_service = ProviderHealthService(provider_repository=provider_repository)
+        notification_repository = NotificationRepository(session=session)
+        user_repository = UserRepository(session=session)
+        kyc_repository = KYCRepository(session=session)
+        transaction_repository = TransactionRepository(session=session)
+        wallet_repository = WalletRepository(session=session)
+        stage = "admin_factory_basic_services_created"
+        logger.info("admin_factory_basic_services_created")
+        notification_service = build_notification_service(session=session)
+        stage = "admin_factory_notification_service_created"
+        logger.info("admin_factory_notification_service_created")
+        api_key_repository = APIKeyRepository(session=session)
+        ledger_repository = None
+        ledger_service = None
+        ledger_repository_module = importlib.import_module("app.repositories.ledger_repository")
+        ledger_service_module = importlib.import_module("app.services.ledger_service")
+        ledger_repository_cls = getattr(ledger_repository_module, "LedgerRepository", None)
+        ledger_service_cls = getattr(ledger_service_module, "LedgerService", None)
+        if ledger_repository_cls is not None and ledger_service_cls is not None:
+            ledger_repository = ledger_repository_cls(session=session)
+            ledger_service = ledger_service_cls(
+                ledger_repository=ledger_repository,
+                wallet_repository=wallet_repository,
+                user_repository=user_repository,
+                transaction_repository=transaction_repository,
+                notification_service=notification_service,
+                logger=logger,
+            )
+        stage = "admin_factory_ledger_created"
+        logger.info("admin_factory_ledger_created")
+        stage = "admin_factory_wallet_service_created"
+        logger.info("admin_factory_wallet_service_created")
+        wallet_service = await get_wallet_service(session=session)
+        stage = "admin_factory_payment_service_created"
+        logger.info("admin_factory_payment_service_created")
+        payment_service = await get_payment_service(session=session)
+        stage = "admin_factory_airtime_service_created"
+        logger.info("admin_factory_airtime_service_created")
+        airtime_service = await get_airtime_service(session=session)
+        stage = "admin_factory_data_service_created"
+        logger.info("admin_factory_data_service_created")
+        data_service = await get_data_service(session=session)
+        stage = "admin_factory_electricity_service_created"
+        logger.info("admin_factory_electricity_service_created")
+        electricity_service = await get_electricity_service(session=session)
+        stage = "admin_factory_tv_service_created"
+        logger.info("admin_factory_tv_service_created")
+        tv_service = await get_tv_service(session=session)
+        stage = "admin_factory_education_service_created"
+        logger.info("admin_factory_education_service_created")
+        education_service = await get_education_service(session=session)
+        wallet_withdrawal_service = WalletWithdrawalService(
             wallet_repository=wallet_repository,
-            user_repository=user_repository,
             transaction_repository=transaction_repository,
-            notification_service=notification_service,
-            logger=logger,
-        )
-    wallet_service = await get_wallet_service(session=session)
-    payment_service = await get_payment_service(session=session)
-    airtime_service = await get_airtime_service(session=session)
-    data_service = await get_data_service(session=session)
-    electricity_service = await get_electricity_service(session=session)
-    tv_service = await get_tv_service(session=session)
-    education_service = await get_education_service(session=session)
-    wallet_withdrawal_service = WalletWithdrawalService(
-        wallet_repository=wallet_repository,
-        transaction_repository=transaction_repository,
-        session=session,
-    )
-    account_lockout_service = AccountLockoutService(user_repository=user_repository, logger=logger)
-    account_state_service = UserAccountStateService()
-    transaction_owner_resolver = TransactionOwnerResolver()
-    kyc_domain_service = UserKYCService(
-        user_repository=user_repository,
-        kyc_repository=kyc_repository,
-        session=session,
-        logger=logger,
-    )
-    wallet_balance_service = None
-    if ledger_service is not None:
-        wallet_balance_service = WalletBalanceService(
-            wallet_repository=wallet_repository,
-            ledger_service=ledger_service,
             session=session,
-            logger=logger,
         )
-    wallet_statement_service = WalletStatementService(
-        wallet_repository=wallet_repository,
-        transaction_repository=transaction_repository,
-        session=session,
-        logger=logger,
-    )
-    wallet_reconciliation_service = WalletReconciliationService(
-        wallet_repository=wallet_repository,
-        transaction_repository=transaction_repository,
-        session=session,
-        logger=logger,
-    )
-
-    return AdminService(
-        admin_repository=admin_repository,
-        dashboard_service=DashboardService(
-            logger=logger,
+        account_lockout_service = AccountLockoutService(user_repository=user_repository, logger=logger)
+        account_state_service = UserAccountStateService()
+        transaction_owner_resolver = TransactionOwnerResolver()
+        kyc_domain_service = UserKYCService(
             user_repository=user_repository,
-            transaction_repository=transaction_repository,
             kyc_repository=kyc_repository,
-            ledger_service=ledger_service,
-        ),
-        user_service=UserAdministrationService(
-            logger=logger,
-            user_repository=user_repository,
-            admin_repository=admin_repository,
-            audit_repository=audit_repository,
-            notification_service=notification_service,
-            account_lockout_service=account_lockout_service,
-            account_state_service=account_state_service,
             session=session,
-        ),
-        kyc_service=KYCService(
             logger=logger,
-            kyc_domain_service=kyc_domain_service,
-            notification_service=notification_service,
-            audit_repository=audit_repository,
-            session=session,
-        ),
-        wallet_service=WalletAdministrationService(
-            logger=logger,
+        )
+        wallet_balance_service = None
+        if ledger_service is not None:
+            wallet_balance_service = WalletBalanceService(
+                wallet_repository=wallet_repository,
+                ledger_service=ledger_service,
+                session=session,
+                logger=logger,
+            )
+        wallet_statement_service = WalletStatementService(
             wallet_repository=wallet_repository,
-            admin_repository=admin_repository,
-            audit_repository=audit_repository,
-            notification_service=notification_service,
-            wallet_service=wallet_service,
-            wallet_balance_service=wallet_balance_service,
-            wallet_statement_service=wallet_statement_service,
-            wallet_reconciliation_service=wallet_reconciliation_service,
-            session=session,
-        ),
-        transaction_service=TransactionAdministrationService(
-            logger=logger,
             transaction_repository=transaction_repository,
-            admin_repository=admin_repository,
-            audit_repository=audit_repository,
-            notification_service=notification_service,
-            wallet_funding_service=wallet_service.funding_service,
-            wallet_transfer_service=wallet_service.transfer_service,
-            wallet_withdrawal_service=wallet_withdrawal_service,
-            airtime_service=airtime_service,
-            data_service=data_service,
-            electricity_service=electricity_service,
-            tv_service=tv_service,
-            education_service=education_service,
-            payment_service=payment_service,
-            transaction_owner_resolver=transaction_owner_resolver,
             session=session,
-        ),
-        payment_service=PaymentAdministrationService(logger=logger),
-        finance_service=FinanceService(
             logger=logger,
-            ledger_service=ledger_service,
+        )
+        wallet_reconciliation_service = WalletReconciliationService(
+            wallet_repository=wallet_repository,
             transaction_repository=transaction_repository,
-            provider_repository=provider_repository,
-        ),
-        fraud_service=FraudService(logger=logger),
-        provider_service=ProviderAdministrationService(
-            logger=logger,
-            provider_repository=provider_repository,
-            admin_repository=admin_repository,
-            audit_repository=audit_repository,
-            provider_health_service=provider_health_service,
-            provider_selector=provider_selector,
             session=session,
-        ),
-        settings_service=SettingsService(
             logger=logger,
-            settings_repository=settings_repository,
-            admin_repository=admin_repository,
-            audit_repository=audit_repository,
-            session=session,
-        ),
-        audit_service=AuditService(logger=logger, audit_repository=audit_repository),
-        api_key_service=ApiKeyService(api_key_repository=api_key_repository, logger=logger),
-        notification_service=NotificationAdministrationService(
-            logger=logger,
-            notification_repository=notification_repository,
-            notification_service=notification_service,
-            admin_repository=admin_repository,
-            audit_repository=audit_repository,
-            session=session,
-        ),
-        monitoring_service=MonitoringService(
-            logger=logger,
-            provider_repository=provider_repository,
-            provider_health_service=provider_health_service,
-        ),
-        report_service=ReportService(
-            logger=logger,
-            audit_repository=audit_repository,
-            ledger_service=ledger_service,
-            transaction_repository=transaction_repository,
-            provider_repository=provider_repository,
-            provider_health_service=provider_health_service,
-        ),
-        staff_service=StaffAdministrationService(
-            logger=logger,
-            admin_repository=admin_repository,
-            audit_repository=audit_repository,
-            password_service=password_service,
-            session=session,
-        ),
-        support_service=SupportAdministrationService(logger=logger),
-        security_service=SecurityAdministrationService(logger=logger),
-        session_service=SessionAdministrationService(
-            logger=logger,
-            session_service=session_service,
-            admin_repository=admin_repository,
-            audit_repository=audit_repository,
-        ),
-        product_service=ProductAdministrationService(logger=logger),
-        marketing_service=MarketingService(logger=logger),
-        merchant_service=MerchantService(logger=logger),
-        logger=logger,
-    )
+        )
 
-
+        stage = "admin_factory_admin_services_created"
+        logger.info("admin_factory_admin_services_created")
+        admin_service = AdminService(
+            admin_repository=admin_repository,
+            dashboard_service=DashboardService(
+                logger=logger,
+                user_repository=user_repository,
+                transaction_repository=transaction_repository,
+                kyc_repository=kyc_repository,
+                ledger_service=ledger_service,
+            ),
+            user_service=UserAdministrationService(
+                logger=logger,
+                user_repository=user_repository,
+                admin_repository=admin_repository,
+                audit_repository=audit_repository,
+                notification_service=notification_service,
+                account_lockout_service=account_lockout_service,
+                account_state_service=account_state_service,
+                session=session,
+            ),
+            kyc_service=KYCService(
+                logger=logger,
+                kyc_domain_service=kyc_domain_service,
+                notification_service=notification_service,
+                audit_repository=audit_repository,
+                session=session,
+            ),
+            wallet_service=WalletAdministrationService(
+                logger=logger,
+                wallet_repository=wallet_repository,
+                admin_repository=admin_repository,
+                audit_repository=audit_repository,
+                notification_service=notification_service,
+                wallet_service=wallet_service,
+                wallet_balance_service=wallet_balance_service,
+                wallet_statement_service=wallet_statement_service,
+                wallet_reconciliation_service=wallet_reconciliation_service,
+                session=session,
+            ),
+            transaction_service=TransactionAdministrationService(
+                logger=logger,
+                transaction_repository=transaction_repository,
+                admin_repository=admin_repository,
+                audit_repository=audit_repository,
+                notification_service=notification_service,
+                wallet_funding_service=wallet_service.funding_service,
+                wallet_transfer_service=wallet_service.transfer_service,
+                wallet_withdrawal_service=wallet_withdrawal_service,
+                airtime_service=airtime_service,
+                data_service=data_service,
+                electricity_service=electricity_service,
+                tv_service=tv_service,
+                education_service=education_service,
+                payment_service=payment_service,
+                transaction_owner_resolver=transaction_owner_resolver,
+                session=session,
+            ),
+            payment_service=PaymentAdministrationService(logger=logger),
+            finance_service=FinanceService(
+                logger=logger,
+                ledger_service=ledger_service,
+                transaction_repository=transaction_repository,
+                provider_repository=provider_repository,
+            ),
+            fraud_service=FraudService(logger=logger),
+            provider_service=ProviderAdministrationService(
+                logger=logger,
+                provider_repository=provider_repository,
+                admin_repository=admin_repository,
+                audit_repository=audit_repository,
+                provider_health_service=provider_health_service,
+                provider_selector=provider_selector,
+                session=session,
+            ),
+            settings_service=SettingsService(
+                logger=logger,
+                settings_repository=settings_repository,
+                admin_repository=admin_repository,
+                audit_repository=audit_repository,
+                session=session,
+            ),
+            audit_service=AuditService(logger=logger, audit_repository=audit_repository),
+            api_key_service=ApiKeyService(api_key_repository=api_key_repository, logger=logger),
+            notification_service=NotificationAdministrationService(
+                logger=logger,
+                notification_repository=notification_repository,
+                notification_service=notification_service,
+                admin_repository=admin_repository,
+                audit_repository=audit_repository,
+                session=session,
+            ),
+            monitoring_service=MonitoringService(
+                logger=logger,
+                provider_repository=provider_repository,
+                provider_health_service=provider_health_service,
+            ),
+            report_service=ReportService(
+                logger=logger,
+                audit_repository=audit_repository,
+                ledger_service=ledger_service,
+                transaction_repository=transaction_repository,
+                provider_repository=provider_repository,
+                provider_health_service=provider_health_service,
+            ),
+            staff_service=StaffAdministrationService(
+                logger=logger,
+                admin_repository=admin_repository,
+                audit_repository=audit_repository,
+                password_service=password_service,
+                session=session,
+            ),
+            support_service=SupportAdministrationService(logger=logger),
+            security_service=SecurityAdministrationService(logger=logger),
+            session_service=SessionAdministrationService(
+                logger=logger,
+                session_service=session_service,
+                admin_repository=admin_repository,
+                audit_repository=audit_repository,
+            ),
+            product_service=ProductAdministrationService(logger=logger),
+            marketing_service=MarketingService(logger=logger),
+            merchant_service=MerchantService(logger=logger),
+            logger=logger,
+        )
+        logger.info("admin_factory_complete")
+        return admin_service
+    except Exception as exc:
+        logger.warning(
+            "admin_factory_failed stage=%s exception_type=%s exception_message=[redacted]",
+            stage,
+            type(exc).__name__,
+        )
+        raise
 async def get_admin_controller(
     admin_service: AdminService = Depends(get_admin_service),
 ) -> AdminController:
