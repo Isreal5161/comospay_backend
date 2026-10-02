@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.admin import Admin
@@ -21,6 +21,12 @@ class AdminRepository:
         await self.session.flush()
         await self.session.refresh(admin)
         return admin
+
+    async def acquire_first_admin_bootstrap_lock(self) -> None:
+        """Lock Admin inserts until the enclosing transaction finishes."""
+        if self.session.get_bind().dialect.name != "postgresql":
+            raise RuntimeError("First-Admin bootstrap requires PostgreSQL table locking.")
+        await self.session.execute(text("LOCK TABLE admins IN SHARE ROW EXCLUSIVE MODE"))
 
     async def get_by_id(self, admin_id: UUID) -> Admin | None:
         """Retrieve an admin by primary key."""

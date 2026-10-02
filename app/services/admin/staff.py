@@ -5,6 +5,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.admin import Admin
@@ -13,6 +14,16 @@ from app.repositories.admin_repository import AdminRepository
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.services.auth.password_service import PasswordService
 from app.utils.exceptions import AuthorizationException, ValidationException
+
+
+class FirstAdminAlreadyExists(ValidationException):
+    """Raised when first-Admin bootstrap is attempted after an Admin exists."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            detail="Bootstrap refused: an Admin account already exists.",
+            error_code="FIRST_ADMIN_ALREADY_EXISTS",
+        )
 
 
 class StaffAdministrationService:
@@ -44,6 +55,59 @@ class StaffAdministrationService:
             "data": {"items": [self._serialize_admin(admin) for admin in admins], "total": total},
             "meta": {"source": "admin.staff", "page": page, "page_size": page_size},
         }
+
+    async def has_admin_accounts(self) -> bool:
+        """Check whether any Admin rows exist without loading the whole table."""
+        if self.admin_repository is None:
+            raise ValidationException(detail="Admin persistence is unavailable.", error_code="ADMIN_PERSISTENCE_UNAVAILABLE")
+        _, total = await self.admin_repository.get_all(page=1, page_size=1)
+        return total > 0
+
+    async def bootstrap_first_admin(
+        self,
+        *,
+        email: str,
+        username: str,
+        password: str,
+        password_confirmation: str,
+    ) -> Admin:
+        """Atomically create the first super-admin through existing persistence and password services."""
+        if self.admin_repository is None or self.session is None:
+            raise ValidationException(detail="Admin persistence is unavailable.", error_code="ADMIN_PERSISTENCE_UNAVAILABLE")
+        if self.password_service is None:
+            raise ValidationException(detail="Password service is unavailable.", error_code="PASSWORD_SERVICE_UNAVAILABLE")
+
+        await self.password_service.enforce_password_policy(
+            password=password,
+            confirmation=password_confirmation,
+        )
+        password_hash = self.password_service.hash_password(password)
+
+        try:
+            async with self.session.begin():
+                await self.admin_repository.acquire_first_admin_bootstrap_lock()
+                _, total = await self.admin_repository.get_all(page=1, page_size=1)
+                if total:
+                    raise FirstAdminAlreadyExists()
+
+                admin = Admin(
+                    email=email.strip().lower(),
+                    username=username.strip(),
+                    role="super_admin",
+                    status="active",
+                    is_active=True,
+                    is_super_admin=True,
+                    mfa_enabled=False,
+                    password_hash=password_hash,
+                )
+                return await self.admin_repository.create(admin)
+        except FirstAdminAlreadyExists:
+            raise
+        except IntegrityError as exc:
+            raise ValidationException(
+                detail="Admin bootstrap conflicted with an existing account.",
+                error_code="ADMIN_BOOTSTRAP_CONFLICT",
+            ) from exc
 
     async def create_admin_account(self, **payload: Any) -> dict[str, Any]:
         if self.admin_repository is None or self.session is None:
