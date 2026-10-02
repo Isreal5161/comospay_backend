@@ -173,7 +173,7 @@ class AdminController:
         self.router.post("/users/{user_id}/sessions/revoke-all", status_code=status.HTTP_200_OK)(self.revoke_all_user_sessions)
         self.router.get("/users/{user_id}/sessions/count", status_code=status.HTTP_200_OK)(self.get_active_session_count)
 
-    async def get_dashboard(self, payload: AdminDashboardRequest | None = None, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def get_dashboard(self, payload: AdminDashboardRequest | None = None, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle administrator dashboard requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         request_payload = payload.model_dump() if payload else {}
@@ -184,7 +184,7 @@ class AdminController:
             success_message="Dashboard data retrieved successfully.",
         )
 
-    async def get_me(self, request: Request | None = None) -> dict[str, Any]:
+    async def get_me(self, request: Request) -> dict[str, Any]:
         """Resolve and return the authoritative profile for the Admin JWT identity."""
         auth_user = getattr(request.state, "auth_user", None) if request is not None else None
         if auth_user is None or getattr(auth_user, "identity_type", "user") != "admin":
@@ -201,7 +201,7 @@ class AdminController:
             success_message="Admin profile retrieved successfully.",
         )
 
-    async def list_users(self, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def list_users(self, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle user management listing requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -211,7 +211,7 @@ class AdminController:
             success_message="Users retrieved successfully.",
         )
 
-    async def get_user(self, user_id: UUID, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def get_user(self, user_id: UUID, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle user lookup requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -221,7 +221,7 @@ class AdminController:
             success_message="User retrieved successfully.",
         )
 
-    async def manage_user(self, user_id: UUID, payload: UserManagementRequest, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def manage_user(self, user_id: UUID, payload: UserManagementRequest, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle user management requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -238,7 +238,7 @@ class AdminController:
             success_message="User management action completed successfully.",
         )
 
-    async def review_kyc(self, user_id: UUID, payload: KYCApprovalSchema, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def review_kyc(self, user_id: UUID, payload: KYCApprovalSchema, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle KYC approval and rejection requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -253,7 +253,7 @@ class AdminController:
             success_message="KYC review completed successfully.",
         )
 
-    async def adjust_wallet(self, payload: WalletAdjustmentRequest, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def adjust_wallet(self, payload: WalletAdjustmentRequest, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle wallet adjustment requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -281,7 +281,8 @@ class AdminController:
         order_by: str = "created_at",
         descending: bool = True,
         admin_id: UUID | None = None,
-        request: Request | None = None,
+        *,
+        request: Request,
     ) -> dict[str, Any]:
         """Handle wallet listing requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
@@ -302,7 +303,7 @@ class AdminController:
             success_message="Wallets retrieved successfully.",
         )
 
-    async def get_wallet_details(self, wallet_id: UUID, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def get_wallet_details(self, wallet_id: UUID, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle wallet detail lookup requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -312,7 +313,7 @@ class AdminController:
             success_message="Wallet retrieved successfully.",
         )
 
-    async def get_user_wallet(self, user_id: UUID, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def get_user_wallet(self, user_id: UUID, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle user wallet lookup requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -333,7 +334,8 @@ class AdminController:
         order_by: str = "created_at",
         descending: bool = True,
         admin_id: UUID | None = None,
-        request: Request | None = None,
+        *,
+        request: Request,
     ) -> dict[str, Any]:
         """Handle wallet search requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
@@ -362,7 +364,8 @@ class AdminController:
         sort_by: str = "created_at",
         sort_desc: bool = True,
         admin_id: UUID | None = None,
-        request: Request | None = None,
+        *,
+        request: Request,
     ) -> dict[str, Any]:
         """Handle wallet transaction history requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
@@ -388,7 +391,8 @@ class AdminController:
         status: str | None = None,
         transaction_type: str | None = None,
         admin_id: UUID | None = None,
-        request: Request | None = None,
+        *,
+        request: Request,
     ) -> dict[str, Any]:
         """Handle wallet analytics requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
@@ -411,7 +415,8 @@ class AdminController:
         wallet_id: UUID,
         payload: WalletStateChangeRequest | None = None,
         admin_id: UUID | None = None,
-        request: Request | None = None,
+        *,
+        request: Request,
     ) -> dict[str, Any]:
         """Handle wallet freeze requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
@@ -423,7 +428,7 @@ class AdminController:
             success_message="Wallet frozen successfully.",
         )
 
-    async def unfreeze_wallet(self, wallet_id: UUID, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def unfreeze_wallet(self, wallet_id: UUID, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle wallet unfreeze requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -438,7 +443,8 @@ class AdminController:
         wallet_id: UUID,
         payload: WalletFundsMutationRequest,
         admin_id: UUID | None = None,
-        request: Request | None = None,
+        *,
+        request: Request,
     ) -> dict[str, Any]:
         """Handle wallet lock requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
@@ -454,7 +460,8 @@ class AdminController:
         wallet_id: UUID,
         payload: WalletFundsMutationRequest,
         admin_id: UUID | None = None,
-        request: Request | None = None,
+        *,
+        request: Request,
     ) -> dict[str, Any]:
         """Handle wallet unlock requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
@@ -470,7 +477,8 @@ class AdminController:
         wallet_id: UUID,
         payload: WalletReconciliationRequest | None = None,
         admin_id: UUID | None = None,
-        request: Request | None = None,
+        *,
+        request: Request,
     ) -> dict[str, Any]:
         """Handle wallet reconciliation requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
@@ -482,7 +490,7 @@ class AdminController:
             success_message="Wallet reconciliation completed successfully.",
         )
 
-    async def list_transactions(self, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def list_transactions(self, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle transaction monitoring requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -492,7 +500,7 @@ class AdminController:
             success_message="Transactions retrieved successfully.",
         )
 
-    async def reverse_transaction(self, transaction_id: UUID, payload: TransactionReverseRequest, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def reverse_transaction(self, transaction_id: UUID, payload: TransactionReverseRequest, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle transaction reversal requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -507,7 +515,7 @@ class AdminController:
             success_message="Transaction reversal completed successfully.",
         )
 
-    async def get_transaction_details(self, transaction_id: UUID, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def get_transaction_details(self, transaction_id: UUID, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle transaction detail retrieval requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -517,7 +525,7 @@ class AdminController:
             success_message="Transaction retrieved successfully.",
         )
 
-    async def retry_failed_transaction(self, transaction_id: UUID, payload: TransactionRetryRequest | None = None, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def retry_failed_transaction(self, transaction_id: UUID, payload: TransactionRetryRequest | None = None, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle retry requests for failed transactions."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         request_payload = payload.model_dump(exclude_unset=True) if payload else {}
@@ -528,7 +536,7 @@ class AdminController:
             success_message="Transaction retry completed successfully.",
         )
 
-    async def resolve_transaction(self, transaction_id: UUID, payload: TransactionResolveRequest | None = None, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def resolve_transaction(self, transaction_id: UUID, payload: TransactionResolveRequest | None = None, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle transaction resolution requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         request_payload = payload.model_dump(exclude_unset=True) if payload else {}
@@ -539,7 +547,7 @@ class AdminController:
             success_message="Transaction resolution completed successfully.",
         )
 
-    async def transaction_timeline(self, transaction_id: UUID, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def transaction_timeline(self, transaction_id: UUID, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle transaction timeline requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -549,7 +557,7 @@ class AdminController:
             success_message="Transaction timeline retrieved successfully.",
         )
 
-    async def list_providers(self, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def list_providers(self, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle provider management listing requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -559,7 +567,7 @@ class AdminController:
             success_message="Providers retrieved successfully.",
         )
 
-    async def configure_provider(self, provider_id: UUID, payload: ProviderManagementRequest, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def configure_provider(self, provider_id: UUID, payload: ProviderManagementRequest, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle provider configuration requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -574,7 +582,7 @@ class AdminController:
             success_message="Provider configuration updated successfully.",
         )
 
-    async def get_system_settings(self, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def get_system_settings(self, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle system settings retrieval requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -584,7 +592,7 @@ class AdminController:
             success_message="System settings retrieved successfully.",
         )
 
-    async def update_system_settings(self, payload: SystemSettingsRequest, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def update_system_settings(self, payload: SystemSettingsRequest, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle system settings update requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -594,7 +602,7 @@ class AdminController:
             success_message="System settings updated successfully.",
         )
 
-    async def list_audit_logs(self, payload: AuditLogFilterSchema | None = None, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def list_audit_logs(self, payload: AuditLogFilterSchema | None = None, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle audit log requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         request_payload = payload.model_dump(exclude_unset=True) if payload else {}
@@ -605,7 +613,7 @@ class AdminController:
             success_message="Audit logs retrieved successfully.",
         )
 
-    async def create_api_key(self, payload: APIKeyCreate, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def create_api_key(self, payload: APIKeyCreate, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle API key creation requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -615,7 +623,7 @@ class AdminController:
             success_message="API key created successfully.",
         )
 
-    async def update_api_key(self, api_key_id: UUID, payload: APIKeyUpdate, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def update_api_key(self, api_key_id: UUID, payload: APIKeyUpdate, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle API key update requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -625,7 +633,7 @@ class AdminController:
             success_message="API key updated successfully.",
         )
 
-    async def revoke_api_key(self, api_key_id: UUID, payload: APIKeyRevokeSchema, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def revoke_api_key(self, api_key_id: UUID, payload: APIKeyRevokeSchema, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle API key revocation requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -635,7 +643,7 @@ class AdminController:
             success_message="API key revoked successfully.",
         )
 
-    async def broadcast_notification(self, payload: NotificationBroadcastRequest, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def broadcast_notification(self, payload: NotificationBroadcastRequest, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle notification broadcast requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -648,7 +656,7 @@ class AdminController:
             success_message="Notification broadcast completed successfully.",
         )
 
-    async def get_platform_statistics(self, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def get_platform_statistics(self, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle platform statistics requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -658,7 +666,7 @@ class AdminController:
             success_message="Platform statistics retrieved successfully.",
         )
 
-    async def get_service_monitoring(self, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def get_service_monitoring(self, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle service monitoring requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -668,7 +676,7 @@ class AdminController:
             success_message="Service monitoring data retrieved successfully.",
         )
 
-    async def generate_report(self, payload: ReportGenerationRequest, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def generate_report(self, payload: ReportGenerationRequest, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle report generation requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -678,7 +686,7 @@ class AdminController:
             success_message="Report generated successfully.",
         )
 
-    async def create_admin_account(self, payload: AdminCreate, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def create_admin_account(self, payload: AdminCreate, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle administrator account creation requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -688,7 +696,7 @@ class AdminController:
             success_message="Admin account created successfully.",
         )
 
-    async def update_admin_account(self, admin_id_value: UUID, payload: AdminUpdate, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def update_admin_account(self, admin_id_value: UUID, payload: AdminUpdate, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle administrator account update requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -698,7 +706,7 @@ class AdminController:
             success_message="Admin account updated successfully.",
         )
 
-    async def revoke_user_session(self, session_id: str, reason: str | None = None, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def revoke_user_session(self, session_id: str, reason: str | None = None, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle revocation of a specific user session."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -708,7 +716,7 @@ class AdminController:
             success_message="Session revoked successfully.",
         )
 
-    async def list_user_sessions(self, user_id: UUID, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def list_user_sessions(self, user_id: UUID, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle listing active sessions for a user."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -718,7 +726,7 @@ class AdminController:
             success_message="User sessions retrieved successfully.",
         )
 
-    async def revoke_all_user_sessions(self, user_id: UUID, reason: str | None = None, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def revoke_all_user_sessions(self, user_id: UUID, reason: str | None = None, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle revoking all active sessions for a user."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -728,7 +736,7 @@ class AdminController:
             success_message="All user sessions revoked successfully.",
         )
 
-    async def get_active_session_count(self, user_id: UUID, admin_id: UUID | None = None, request: Request | None = None) -> dict[str, Any]:
+    async def get_active_session_count(self, user_id: UUID, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
         """Handle retrieval of active session count for a user."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
