@@ -283,7 +283,7 @@ class AuthController:
             success_message="Password reset successfully.",
         )
 
-    async def change_password(self, payload: ChangePasswordRequest, request: Request | None = None) -> dict[str, Any]:
+    async def change_password(self, payload: ChangePasswordRequest, request: Request) -> dict[str, Any]:
         """Handle change password requests."""
         effective_user_id = self._resolve_authenticated_user_id(request) or payload.user_id
         return await self._execute(
@@ -297,7 +297,7 @@ class AuthController:
             success_message="Password changed successfully.",
         )
 
-    async def verify_device(self, payload: DeviceVerificationRequest, request: Request | None = None) -> dict[str, Any]:
+    async def verify_device(self, payload: DeviceVerificationRequest, request: Request) -> dict[str, Any]:
         """Handle device verification requests."""
         effective_user_id = self._resolve_authenticated_user_id(request) or payload.user_id
         return await self._execute(
