@@ -68,3 +68,102 @@ class AdminPasswordChangeSchema(BaseModel):
 
     current_password: str = Field(..., min_length=8, max_length=255, description="Current password.")
     new_password: str = Field(..., min_length=8, max_length=255, description="New password.")
+
+
+class DashboardPeriod(BaseModel):
+    """Half-open reporting window in the Africa/Lagos timezone."""
+
+    start: datetime
+    end: datetime
+
+
+class DashboardMetricComparison(BaseModel):
+    """Current and equivalent prior-period values without inferred percentages."""
+
+    current: int
+    previous: int | None
+    change: int | None
+    current_period: DashboardPeriod | None
+    previous_period: DashboardPeriod | None
+    unavailable_reason: str | None = None
+
+
+class DashboardMetrics(BaseModel):
+    total_users: int
+    active_users_today: int
+    new_registrations_today: int
+    total_transactions: int = Field(description="All persisted transactions, regardless of lifecycle status.")
+    pending_transactions: int = Field(description="Transactions whose current status is exactly 'pending'.")
+    failed_transactions: int = Field(description="Transactions whose current status is exactly 'failed'.")
+    period_comparison: dict[str, DashboardMetricComparison] = Field(
+        description="Absolute equivalent-period comparisons; no percentage changes are inferred."
+    )
+
+
+class DashboardMoneyByCurrency(BaseModel):
+    currency: str
+    amount: str
+
+
+class DashboardWalletBalances(BaseModel):
+    currency: str
+    ledger_balance: str
+    available_balance: str
+    locked_balance: str
+
+
+class DashboardAnalyticsBucket(BaseModel):
+    """Bucketed counts and successful monetary volume, grouped by currency."""
+
+    bucket: str
+    registrations: int
+    transactions: int
+    transaction_volume: list[DashboardMoneyByCurrency]
+
+
+class DashboardFinancialMetrics(BaseModel):
+    revenue: str | None
+    profit: str | None
+    revenue_unavailable_reason: str | None
+    profit_unavailable_reason: str | None
+
+
+class DashboardCategoryBreakdown(BaseModel):
+    category: str
+    provider: str | None
+    currency: str
+    transaction_count: int
+    transaction_volume: str
+
+
+class DashboardData(BaseModel):
+    metrics: DashboardMetrics
+    wallet_balances: list[DashboardWalletBalances]
+    transaction_volume: list[DashboardMoneyByCurrency] = Field(
+        description=(
+            "All-time sum of transactions in successful lifecycle states, grouped by currency. "
+            "The states are completed, posted, successful, succeeded (case-insensitive), and settled."
+        )
+    )
+    financial_metrics: DashboardFinancialMetrics
+    analytics: dict[str, list[DashboardAnalyticsBucket]] = Field(
+        description=(
+            "Daily contains the last 7 Lagos calendar days, weekly the last 12 Monday-based weeks, "
+            "and monthly the last 12 calendar months."
+        )
+    )
+    category_breakdown: list[DashboardCategoryBreakdown] = Field(
+        description=(
+            "Raw category/provider transaction counts and successful transaction volume by currency; "
+            "transaction counts include every lifecycle status."
+        )
+    )
+
+
+class DashboardResponse(BaseModel):
+    """Standard controller envelope for the admin dashboard endpoint."""
+
+    success: bool
+    message: str
+    data: DashboardData
+    status_code: int

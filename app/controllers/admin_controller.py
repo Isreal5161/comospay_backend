@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from app.schemas.admin_schema import AdminCreate, AdminUpdate
+from app.schemas.admin_schema import AdminCreate, AdminUpdate, DashboardResponse
 from app.schemas.api_key_schema import APIKeyCreate, APIKeyRevokeSchema, APIKeyUpdate
 from app.schemas.audit_log_schema import AuditLogFilterSchema
 from app.schemas.kyc_schema import KYCApprovalSchema
@@ -130,7 +130,11 @@ class AdminController:
         self._register_routes()
 
     def _register_routes(self) -> None:
-        self.router.get("/dashboard", status_code=status.HTTP_200_OK)(self.get_dashboard)
+        self.router.get(
+            "/dashboard",
+            status_code=status.HTTP_200_OK,
+            response_model=DashboardResponse,
+        )(self.get_dashboard)
         self.router.get("/me", status_code=status.HTTP_200_OK)(self.get_me)
         self.router.get("/users", status_code=status.HTTP_200_OK)(self.list_users)
         self.router.get("/users/{user_id}", status_code=status.HTTP_200_OK)(self.get_user)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,8 +16,135 @@ from app.utils.exceptions import DuplicateProviderReferenceException
 class TransactionRepository:
     """Repository for database access to transaction records."""
 
+    _CASE_INSENSITIVE_SUCCESS_STATUSES = ("completed", "posted", "successful", "succeeded")
+
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+
+    @classmethod
+    def _dashboard_success_status(cls):
+        return or_(
+            func.lower(Transaction.status).in_(cls._CASE_INSENSITIVE_SUCCESS_STATUSES),
+            Transaction.status == "settled",
+        )
+
+    async def get_dashboard_counts(self) -> dict[str, int]:
+        """Return persisted transaction counts by dashboard lifecycle status."""
+        result = await self.session.execute(
+            select(
+                func.count(Transaction.id).label("total_transactions"),
+                func.count(
+                    case((Transaction.status == "pending", Transaction.id))
+                ).label("pending_transactions"),
+                func.count(
+                    case((Transaction.status == "failed", Transaction.id))
+                ).label("failed_transactions"),
+            )
+        )
+        row = result.one()
+        return {
+            "total_transactions": int(row.total_transactions or 0),
+            "pending_transactions": int(row.pending_transactions or 0),
+            "failed_transactions": int(row.failed_transactions or 0),
+        }
+
+    async def get_successful_volume_by_currency(self) -> list[tuple[str, Decimal]]:
+        """Sum successful transaction amounts by currency using reconciliation statuses."""
+        successful_status = self._dashboard_success_status()
+        result = await self.session.execute(
+            select(
+                Transaction.currency,
+                func.coalesce(func.sum(Transaction.amount), Decimal("0.00")),
+            )
+            .where(successful_status, Transaction.amount >= Decimal("0.00"))
+            .group_by(Transaction.currency)
+            .order_by(Transaction.currency)
+        )
+        return [(currency, amount or Decimal("0.00")) for currency, amount in result.all()]
+
+    async def get_dashboard_category_breakdown(self) -> list[tuple[str, str | None, str, int, Decimal]]:
+        """Aggregate raw transaction category/provider volume by currency."""
+        successful_status = self._dashboard_success_status()
+        result = await self.session.execute(
+            select(
+                Transaction.category,
+                Transaction.provider_name,
+                Transaction.currency,
+                func.count(Transaction.id),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                successful_status & (Transaction.amount >= Decimal("0.00")),
+                                Transaction.amount,
+                            ),
+                            else_=Decimal("0.00"),
+                        )
+                    ),
+                    Decimal("0.00"),
+                ),
+            )
+            .group_by(
+                Transaction.category,
+                Transaction.provider_name,
+                Transaction.currency,
+            )
+            .order_by(
+                Transaction.category,
+                Transaction.provider_name,
+                Transaction.currency,
+            )
+        )
+        return [
+            (category, provider, currency, int(count or 0), amount or Decimal("0.00"))
+            for category, provider, currency, count, amount in result.all()
+        ]
+
+    async def get_dashboard_analytics_by_bucket(
+        self,
+        buckets: list[tuple[str, datetime, datetime]],
+    ) -> list[tuple[str, str, int, Decimal]]:
+        """Aggregate transaction counts and successful volume by bucket and currency."""
+        if not buckets:
+            return []
+
+        successful_status = self._dashboard_success_status()
+        bucket_case = case(
+            *[
+                ((Transaction.created_at >= start) & (Transaction.created_at < end), label)
+                for label, start, end in buckets
+            ],
+            else_=None,
+        )
+        result = await self.session.execute(
+            select(
+                bucket_case.label("bucket"),
+                Transaction.currency,
+                func.count(Transaction.id),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                successful_status & (Transaction.amount >= Decimal("0.00")),
+                                Transaction.amount,
+                            ),
+                            else_=Decimal("0.00"),
+                        )
+                    ),
+                    Decimal("0.00"),
+                ),
+            )
+            .where(
+                Transaction.created_at >= buckets[0][1],
+                Transaction.created_at < buckets[-1][2],
+            )
+            .group_by(bucket_case, Transaction.currency)
+        )
+        return [
+            (str(bucket), currency, int(count or 0), amount or Decimal("0.00"))
+            for bucket, currency, count, amount in result.all()
+            if bucket is not None
+        ]
 
     @staticmethod
     def _is_provider_reference_unique_violation(exc: IntegrityError) -> bool:

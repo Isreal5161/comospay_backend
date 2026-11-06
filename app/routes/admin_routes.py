@@ -43,7 +43,7 @@ from app.routes.electricity_routes import get_electricity_service
 from app.routes.payment_routes import get_payment_service
 from app.routes.tv_routes import get_tv_service
 from app.routes.wallet_routes import get_wallet_service
-from app.schemas.admin_schema import AdminCreate, AdminUpdate
+from app.schemas.admin_schema import AdminCreate, AdminUpdate, DashboardResponse
 from app.schemas.api_key_schema import APIKeyCreate, APIKeyRevokeSchema, APIKeyUpdate
 from app.schemas.audit_log_schema import AuditLogFilterSchema
 from app.schemas.kyc_schema import KYCApprovalSchema
@@ -201,6 +201,7 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
                 user_repository=user_repository,
                 transaction_repository=transaction_repository,
                 kyc_repository=kyc_repository,
+                wallet_repository=wallet_repository,
                 ledger_service=ledger_service,
             ),
             user_service=UserAdministrationService(
@@ -333,7 +334,7 @@ async def get_admin_controller(
     return AdminController(admin_service)
 
 
-@router.get("/dashboard", status_code=status.HTTP_200_OK)
+@router.get("/dashboard", status_code=status.HTTP_200_OK, response_model=DashboardResponse)
 async def get_dashboard(
     request: Request,
     payload: AdminDashboardRequest | None = None,

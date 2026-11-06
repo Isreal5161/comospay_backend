@@ -69,6 +69,28 @@ class WalletRepository:
         result = await self.session.execute(select(Wallet).where(Wallet.wallet_reference == wallet_reference).with_for_update())
         return result.scalar_one_or_none()
 
+    async def get_dashboard_balances_by_currency(self) -> list[tuple[str, Decimal, Decimal, Decimal]]:
+        """Sum wallet balance fields by currency, including frozen or inactive wallets."""
+        result = await self.session.execute(
+            select(
+                Wallet.currency,
+                func.coalesce(func.sum(Wallet.ledger_balance), Decimal("0.00")),
+                func.coalesce(func.sum(Wallet.available_balance), Decimal("0.00")),
+                func.coalesce(func.sum(Wallet.locked_balance), Decimal("0.00")),
+            )
+            .group_by(Wallet.currency)
+            .order_by(Wallet.currency)
+        )
+        return [
+            (
+                currency,
+                ledger_balance or Decimal("0.00"),
+                available_balance or Decimal("0.00"),
+                locked_balance or Decimal("0.00"),
+            )
+            for currency, ledger_balance, available_balance, locked_balance in result.all()
+        ]
+
     async def list_wallets(
         self,
         *,
