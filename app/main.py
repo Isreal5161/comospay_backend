@@ -136,6 +136,11 @@ def create_app() -> FastAPI:
         await disconnect_redis()
         engine.dispose()
 
+    if not hasattr(app.router, "startup"):
+        app.router.startup = startup_event
+    if not hasattr(app.router, "shutdown"):
+        app.router.shutdown = shutdown_event
+
     return app
 
 
