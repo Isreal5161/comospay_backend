@@ -48,6 +48,7 @@ from app.schemas.api_key_schema import APIKeyCreate, APIKeyRevokeSchema, APIKeyU
 from app.schemas.audit_log_schema import AuditLogFilterSchema
 from app.schemas.kyc_schema import KYCApprovalSchema
 from app.services.notification_service import build_notification_service
+from app.utils.logger import get_logger
 from app.services.admin import (
     ApiKeyService,
     AuditService,
