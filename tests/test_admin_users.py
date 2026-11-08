@@ -204,6 +204,7 @@ async def test_get_user_returns_uuid_profile_and_unknown_user_uses_not_found_err
     ("action", "expected_status", "expected_active", "expected_blocked", "expected_suspended"),
     [
         ("suspend", "suspended", True, False, True),
+        ("deactivate", "inactive", False, False, False),
         ("activate", "active", True, False, False),
         ("block", "blocked", True, True, False),
         ("unblock", "active", True, False, False),
@@ -239,10 +240,32 @@ async def test_manage_user_applies_supported_account_state_actions(
     assert result["user"]["is_active"] is expected_active
     assert result["user"]["is_blocked"] is expected_blocked
     assert result["user"]["is_suspended"] is expected_suspended
-    expected_revocations = 1 if action in {"suspend", "block"} else 0
+    expected_revocations = 1 if action in {"deactivate", "suspend", "block"} else 0
     assert len(service.session_service.revocations) == expected_revocations
     if expected_revocations:
         assert service.session_service.revocations[0][1] == f"admin_user_{action}"
+
+
+@pytest.mark.asyncio
+async def test_reactivation_does_not_restore_sessions_revoked_by_deactivation(user_admin_service):
+    service, session = user_admin_service
+    user = _user(
+        email="deactivation-cycle@example.test",
+        first_name="Reactivation",
+        last_name="User",
+        username="reactivationuser",
+        phone="+234800000007",
+    )
+    session.add(user)
+    await session.flush()
+
+    await service.manage_user(admin_id=_ADMIN_ID, user_id=user.id, action="deactivate")
+    assert service.session_service.revocations == [(str(user.id), "admin_user_deactivate")]
+
+    result = await service.manage_user(admin_id=_ADMIN_ID, user_id=user.id, action="activate")
+
+    assert result["user"]["status"] == "active"
+    assert service.session_service.revocations == [(str(user.id), "admin_user_deactivate")]
 
 
 @pytest.mark.asyncio

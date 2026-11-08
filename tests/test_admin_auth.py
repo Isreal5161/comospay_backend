@@ -678,6 +678,106 @@ async def test_auth_middleware_rejects_revoked_session_bound_access_token(
     assert response.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_auth_middleware_requires_session_for_signed_legacy_access_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+    token_service = make_token_service(redis)
+    sessionless_token = token_service.create_access_token(
+        "user-uuid",
+        extra_claims={
+            "user_id": "user-uuid",
+            "email": "user@example.com",
+            "role": "user",
+            "identity_type": "user",
+        },
+    )
+    monkeypatch.setattr("app.middleware.auth_middleware.TokenService", lambda: token_service)
+
+    class UnexpectedSessionService:
+        async def validate_session(self, *, session_id: str) -> dict[str, str]:
+            raise AssertionError("Session validation must not run for a sessionless token.")
+
+    monkeypatch.setattr("app.middleware.auth_middleware.SessionService", UnexpectedSessionService)
+    middleware = AuthMiddleware(lambda *_: None, public_paths=[])
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/users/me",
+        "raw_path": b"/users/me",
+        "query_string": b"",
+        "headers": [(b"authorization", f"Bearer {sessionless_token}".encode("utf-8"))],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8000),
+        "scheme": "http",
+        "http_version": "1.1",
+    }
+    request = Request(scope)
+    endpoint_called = False
+
+    async def endpoint(_: Request) -> Response:
+        nonlocal endpoint_called
+        endpoint_called = True
+        return Response("ok", status_code=200)
+
+    response = await middleware.dispatch(request, endpoint)
+
+    assert response.status_code == 401
+    assert endpoint_called is False
+
+
+@pytest.mark.parametrize("invalid_reason", ["signature", "expired"])
+@pytest.mark.asyncio
+async def test_auth_middleware_still_rejects_invalid_or_expired_access_tokens(
+    invalid_reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_service = make_token_service(FakeRedis())
+    access_token = token_service.create_access_token(
+        "user-uuid",
+        extra_claims={
+            "user_id": "user-uuid",
+            "email": "user@example.com",
+            "role": "user",
+            "identity_type": "user",
+            "session_id": "valid-session",
+        },
+        ttl=timedelta(seconds=-1) if invalid_reason == "expired" else None,
+    )
+    if invalid_reason == "signature":
+        header, payload, signature = access_token.split(".")
+        replacement = "A" if signature[0] != "A" else "B"
+        access_token = f"{header}.{payload}.{replacement}{signature[1:]}"
+    monkeypatch.setattr("app.middleware.auth_middleware.TokenService", lambda: token_service)
+
+    class UnexpectedSessionService:
+        async def validate_session(self, *, session_id: str) -> dict[str, str]:
+            raise AssertionError("Invalid tokens must be rejected before session lookup.")
+
+    monkeypatch.setattr("app.middleware.auth_middleware.SessionService", UnexpectedSessionService)
+    middleware = AuthMiddleware(lambda *_: None, public_paths=[])
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/users/me",
+        "raw_path": b"/users/me",
+        "query_string": b"",
+        "headers": [(b"authorization", f"Bearer {access_token}".encode("utf-8"))],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8000),
+        "scheme": "http",
+        "http_version": "1.1",
+    }
+
+    async def endpoint(_: Request) -> Response:
+        return Response("ok", status_code=200)
+
+    response = await middleware.dispatch(Request(scope), endpoint)
+
+    assert response.status_code == 401
+
+
 @pytest.mark.parametrize(
     ("identity_type", "role", "expected_status"),
     [("user", "admin", 403), ("admin", "customer", 403), ("admin", "admin", 200)],

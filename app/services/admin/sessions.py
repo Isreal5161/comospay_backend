@@ -29,12 +29,24 @@ class SessionAdministrationService:
         self.admin_repository = admin_repository
         self.audit_repository = audit_repository
 
-    async def revoke_session_by_id(self, *, session_id: str, reason: str | None = None, **payload: Any) -> dict[str, Any]:
+    async def revoke_session_by_id(
+        self,
+        *,
+        session_id: str,
+        user_id: str | UUID,
+        reason: str | None = None,
+        **payload: Any,
+    ) -> dict[str, Any]:
         """Revoke a specific session for a user from the admin console."""
         self._require_session_service()
         actor_admin_id = await self._require_authorized_admin(payload)
         if not session_id:
             raise ValidationException(detail="Session identifier is required.", error_code="SESSION_ID_REQUIRED")
+
+        user_identifier = str(user_id)
+        session = await self.session_service.retrieve_session(session_id=session_id, allow_inactive=True)
+        if str(session.get("user_id") or "") != user_identifier:
+            raise SessionNotFoundException()
 
         if not isinstance(reason, str) or not reason.strip():
             reason = "admin_revoke"
@@ -42,8 +54,12 @@ class SessionAdministrationService:
         revoked_payload: dict[str, Any] = {"session_id": session_id, "status": "revoked"}
         idempotent = False
         try:
-            revoked_payload = await self.session_service.revoke_session(session_id=session_id, reason=reason)
-        except (SessionNotFoundException, SessionRevokedException):
+            revoked_payload = await self.session_service.revoke_session(
+                session_id=session_id,
+                reason=reason,
+                expected_user_id=user_identifier,
+            )
+        except SessionRevokedException:
             idempotent = True
 
         await self._create_audit_log(
@@ -79,6 +95,7 @@ class SessionAdministrationService:
             "data": [
                 {
                     "status": session.get("status"),
+                    "session_id": session.get("session_id"),
                     "created_at": session.get("created_at"),
                     "last_activity_at": session.get("last_activity_at"),
                     "expires_at": session.get("expires_at"),

@@ -113,7 +113,7 @@ class SessionService:
         log_security_event(self.logger, "Session created", session_id=session_id, user_id=user_id)
         return session_payload
 
-    async def retrieve_session(self, *, session_id: str) -> dict[str, Any]:
+    async def retrieve_session(self, *, session_id: str, allow_inactive: bool = False) -> dict[str, Any]:
         """Retrieve a session payload by identifier."""
         if not session_id:
             raise InvalidSessionException(detail="Session identifier is required.")
@@ -127,7 +127,8 @@ class SessionService:
             raise SessionNotFoundException()
 
         payload = json.loads(payload_raw)
-        await self._assert_session_state(payload)
+        if not allow_inactive:
+            await self._assert_session_state(payload)
         return payload
 
     async def update_session(self, *, session_id: str, **updates: Any) -> dict[str, Any]:
@@ -176,9 +177,24 @@ class SessionService:
         await redis_client.set(self._session_key(session_id), json.dumps(payload), ex=self._ttl_seconds(expires_at))
         return payload
 
-    async def revoke_session(self, *, session_id: str, reason: str | None = None) -> dict[str, Any]:
+    async def revoke_session(
+        self,
+        *,
+        session_id: str,
+        reason: str | None = None,
+        expected_user_id: str | None = None,
+    ) -> dict[str, Any]:
         """Revoke a specific session and mark it as inactive."""
-        payload = await self.retrieve_session(session_id=session_id)
+        payload = await self.retrieve_session(
+            session_id=session_id,
+            allow_inactive=expected_user_id is not None,
+        )
+        if expected_user_id is not None and str(payload.get("user_id") or "") != str(expected_user_id):
+            raise SessionNotFoundException()
+        if payload.get("status") == "revoked":
+            raise SessionRevokedException()
+        if self._is_expired(payload):
+            raise SessionExpiredException()
         payload["status"] = "revoked"
         payload["revoked_at"] = datetime.now(timezone.utc).isoformat()
         payload["revoked_reason"] = reason or "manual"

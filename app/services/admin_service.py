@@ -258,8 +258,14 @@ class AdminService:
     async def update_admin_account(self, *, admin_id: str, **payload: Any) -> dict[str, Any]:
         return await self.staff_service.update_admin_account(admin_id=admin_id, **payload)
 
-    async def revoke_user_session(self, *, session_id: str, **payload: Any) -> dict[str, Any]:
-        return await self.session_service.revoke_session_by_id(session_id=session_id, **payload)
+    async def revoke_user_session(
+        self,
+        *,
+        session_id: str,
+        user_id: UUID,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        return await self.session_service.revoke_session_by_id(session_id=session_id, user_id=user_id, **payload)
 
     async def list_user_sessions(self, *, user_id, **payload: Any) -> dict[str, Any]:
         return await self.session_service.get_user_sessions(user_id=user_id, **payload)

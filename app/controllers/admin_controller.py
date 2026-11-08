@@ -197,6 +197,10 @@ class AdminController:
         self.router.put("/admins/{admin_id}", status_code=status.HTTP_200_OK)(self.update_admin_account)
         self.router.post("/sessions/{session_id}/revoke", status_code=status.HTTP_200_OK)(self.revoke_user_session)
         self.router.get("/users/{user_id}/sessions", status_code=status.HTTP_200_OK)(self.list_user_sessions)
+        self.router.post(
+            "/users/{user_id}/sessions/{session_id}/revoke",
+            status_code=status.HTTP_200_OK,
+        )(self.revoke_user_session_for_user)
         self.router.post("/users/{user_id}/sessions/revoke-all", status_code=status.HTTP_200_OK)(self.revoke_all_user_sessions)
         self.router.get("/users/{user_id}/sessions/count", status_code=status.HTTP_200_OK)(self.get_active_session_count)
 
@@ -935,13 +939,44 @@ class AdminController:
             success_message="Admin account updated successfully.",
         )
 
-    async def revoke_user_session(self, session_id: str, reason: str | None = None, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
+    async def revoke_user_session(
+        self,
+        session_id: str,
+        user_id: UUID,
+        reason: str | None = None,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
         """Handle revocation of a specific user session."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
             action="revoke_user_session",
             handler=self._resolve_handler("revoke_user_session"),
-            payload={"admin_id": target_admin_id, "session_id": session_id, "reason": reason},
+            payload={"admin_id": target_admin_id, "user_id": user_id, "session_id": session_id, "reason": reason},
+            success_message="Session revoked successfully.",
+        )
+
+    async def revoke_user_session_for_user(
+        self,
+        user_id: UUID,
+        session_id: str,
+        reason: str | None = None,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        """Revoke a session only when it belongs to the selected user."""
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="revoke_user_session",
+            handler=self._resolve_handler("revoke_user_session"),
+            payload={
+                "admin_id": target_admin_id,
+                "user_id": user_id,
+                "session_id": session_id,
+                "reason": reason,
+            },
             success_message="Session revoked successfully.",
         )
 

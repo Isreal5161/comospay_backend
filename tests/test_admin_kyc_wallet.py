@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -188,6 +189,42 @@ async def test_admin_kyc_review_rejects_repeated_terminal_decision(database_sess
 
 
 @pytest.mark.asyncio
+async def test_admin_kyc_history_paginates_with_user_scoping(database_session):
+    session = database_session
+    user = await add_user(session, "paged-kyc@example.test")
+    other_user = await add_user(session, "other-paged-kyc@example.test")
+    first = make_kyc(user.id, created_at=datetime(2026, 1, 3, tzinfo=timezone.utc))
+    second = make_kyc(user.id, created_at=datetime(2026, 1, 2, tzinfo=timezone.utc))
+    third = make_kyc(user.id, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    unrelated = make_kyc(other_user.id, created_at=datetime(2026, 1, 4, tzinfo=timezone.utc))
+    session.add_all([first, second, third, unrelated])
+    await session.flush()
+
+    service = make_kyc_service(session)
+    first_page = await service.get_user_kyc(
+        user_id=user.id,
+        page=1,
+        page_size=2,
+        admin_id=ADMIN_ID,
+    )
+    second_page = await service.get_user_kyc(
+        user_id=user.id,
+        page=2,
+        page_size=2,
+        admin_id=ADMIN_ID,
+    )
+
+    assert first_page["page"] == 1
+    assert first_page["total"] == 3
+    assert first_page["total_pages"] == 2
+    assert [item["id"] for item in first_page["items"]] == [str(first.id), str(second.id)]
+    assert second_page["page"] == 2
+    assert second_page["total"] == 3
+    assert second_page["total_pages"] == 2
+    assert [item["id"] for item in second_page["items"]] == [str(third.id)]
+
+
+@pytest.mark.asyncio
 async def test_admin_kyc_rejection_records_reviewer_time_and_reason(database_session):
     session = database_session
     user = await add_user(session, "rejected-kyc@example.test")
@@ -237,6 +274,7 @@ async def test_admin_kyc_and_user_scoped_transaction_routes_are_registered():
     assert ("/admin/users/{user_id}/kyc/{kyc_id}/review", "POST") in paths
     assert ("/admin/users/{user_id}/transactions", "GET") in paths
     assert ("/admin/transactions", "GET") in paths
+    assert ("/admin/users/{user_id}/sessions/{session_id}/revoke", "POST") in paths
 
 
 def make_wallet_service(session, *, wallet_repository: WalletRepository | None = None, ledger_service=None):

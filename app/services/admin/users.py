@@ -166,7 +166,7 @@ class UserAdministrationService:
             user = await self._get_user_or_raise(user_id=user_id)
             old_payload = self._serialize_user(user)
             updates = self.account_state_service.resolve_state_updates(action=normalized_action)
-            if normalized_action in {"block", "suspend"}:
+            if normalized_action in {"block", "suspend", "deactivate"}:
                 if self.session_service is None:
                     raise ValidationException(
                         detail="Session revocation service is unavailable.",

@@ -942,11 +942,33 @@ async def update_admin_account(
 @router.post("/sessions/{session_id}/revoke", status_code=status.HTTP_200_OK)
 async def revoke_user_session(
     session_id: str,
+    user_id: UUID,
     request: Request,
     reason: str | None = None,
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
-    return await controller.revoke_user_session(session_id=session_id, reason=reason, request=request)
+    return await controller.revoke_user_session(
+        session_id=session_id,
+        user_id=user_id,
+        reason=reason,
+        request=request,
+    )
+
+
+@router.post("/users/{user_id}/sessions/{session_id}/revoke", status_code=status.HTTP_200_OK)
+async def revoke_user_session_for_user(
+    user_id: UUID,
+    session_id: str,
+    request: Request,
+    reason: str | None = None,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.revoke_user_session_for_user(
+        user_id,
+        session_id,
+        reason=reason,
+        request=request,
+    )
 
 
 @router.get("/users/{user_id}/sessions", status_code=status.HTTP_200_OK)
