@@ -72,6 +72,20 @@ class LedgerRepository:
             logger.exception("Failed to fetch ledger by reference")
             raise DatabaseException(detail="Unable to fetch ledger record.") from exc
 
+    async def get_by_wallet_reference(self, *, wallet_id: UUID, transaction_reference: str) -> list[Ledger]:
+        """Retrieve entries matching an idempotency reference within one wallet."""
+        try:
+            result = await self.session.execute(
+                select(Ledger).where(
+                    Ledger.wallet_id == wallet_id,
+                    Ledger.transaction_reference == transaction_reference,
+                )
+            )
+            return list(result.scalars().all())
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to fetch ledger by wallet reference")
+            raise DatabaseException(detail="Unable to fetch ledger record.") from exc
+
     async def get_by_transaction_id(self, related_transaction_id: UUID) -> list[Ledger]:
         """Retrieve ledger entries associated with a transaction."""
         try:
@@ -90,6 +104,41 @@ class LedgerRepository:
             return list(result.scalars().all())
         except SQLAlchemyError as exc:
             logger.exception("Failed to fetch ledger by wallet id")
+            raise DatabaseException(detail="Unable to fetch ledger records.") from exc
+
+    async def list_wallet_entries(
+        self,
+        *,
+        wallet_id: UUID,
+        user_id: UUID,
+        page: int,
+        page_size: int,
+        currency: str | None = None,
+        status: str | None = None,
+        entry_type: str | None = None,
+    ) -> tuple[list[Ledger], int]:
+        """Return paginated ledger entries constrained to the owning user and wallet."""
+        query = select(Ledger).where(Ledger.wallet_id == wallet_id, Ledger.user_id == user_id)
+        if currency:
+            query = query.where(Ledger.currency == currency.upper())
+        if status:
+            query = query.where(Ledger.status == status)
+        if entry_type:
+            query = query.where(Ledger.entry_type == entry_type.upper())
+
+        try:
+            count_result = await self.session.execute(
+                select(func.count()).select_from(query.order_by(None).subquery())
+            )
+            total = int(count_result.scalar_one() or 0)
+            result = await self.session.execute(
+                query.order_by(Ledger.created_at.desc(), Ledger.ledger_id)
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            return list(result.scalars().all()), total
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to list wallet ledger entries")
             raise DatabaseException(detail="Unable to fetch ledger records.") from exc
 
     async def get_by_user_id(self, user_id: UUID) -> list[Ledger]:

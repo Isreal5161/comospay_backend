@@ -176,6 +176,7 @@ class WalletBalanceService:
         transaction_type: str = "CREDIT",
         description: str | None = None,
         metadata: dict[str, Any] | None = None,
+        created_by: str = "system",
     ) -> dict[str, Any]:
         """Credit wallet with atomic transaction guarantee.
 
@@ -240,7 +241,7 @@ class WalletBalanceService:
             )
 
             # Create ledger entry
-            ledger_entry = await self.ledger_service.create_ledger_entry(
+            ledger_entry = await self.ledger_service.create_entry(
                 wallet_id=wallet_id,
                 user_id=wallet.user_id,
                 transaction_reference=transaction_reference,
@@ -249,11 +250,11 @@ class WalletBalanceService:
                 opening_balance=opening_balance,
                 credit_amount=amount_decimal,
                 debit_amount=Decimal("0"),
-                closing_balance=new_available,
                 status="POSTED",
                 currency=wallet.currency,
                 description=description,
                 metadata=metadata,
+                created_by=created_by,
             )
 
             # Commit transaction
@@ -307,6 +308,7 @@ class WalletBalanceService:
         transaction_type: str = "DEBIT",
         description: str | None = None,
         metadata: dict[str, Any] | None = None,
+        created_by: str = "system",
     ) -> dict[str, Any]:
         """Debit wallet with sufficient balance validation.
 
@@ -379,7 +381,7 @@ class WalletBalanceService:
             )
 
             # Create ledger entry
-            ledger_entry = await self.ledger_service.create_ledger_entry(
+            ledger_entry = await self.ledger_service.create_entry(
                 wallet_id=wallet_id,
                 user_id=wallet.user_id,
                 transaction_reference=transaction_reference,
@@ -388,11 +390,11 @@ class WalletBalanceService:
                 opening_balance=opening_balance,
                 credit_amount=Decimal("0"),
                 debit_amount=amount_decimal,
-                closing_balance=new_available,
                 status="POSTED",
                 currency=wallet.currency,
                 description=description,
                 metadata=metadata,
+                created_by=created_by,
             )
 
             # Commit transaction

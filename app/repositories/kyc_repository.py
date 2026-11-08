@@ -27,6 +27,15 @@ class KYCRepository:
         result = await self.session.execute(select(KYC).where(KYC.id == kyc_id))
         return result.scalar_one_or_none()
 
+    async def get_user_submission_for_update(self, *, user_id: UUID, kyc_id: UUID) -> KYC | None:
+        """Retrieve and lock the specified submission only when it belongs to the user."""
+        result = await self.session.execute(
+            select(KYC)
+            .where(KYC.id == kyc_id, KYC.user_id == user_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def get_user_kyc(
         self,
         *,

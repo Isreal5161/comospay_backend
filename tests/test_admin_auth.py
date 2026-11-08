@@ -214,12 +214,28 @@ def make_user_refresh_service(
         is_suspended=False,
     )
     user_repository = FakeUserRepository(user)
+    session_service = FakeSessionService()
+    session_id = "user-session"
+    family_id = token_service.generate_token_family_id()
+    session_service.sessions[session_id] = {
+        "session_id": session_id,
+        "user_id": str(user_id),
+        "status": "active",
+        "refresh_token_family_id": family_id,
+    }
     service = AuthService(
         user_repository=user_repository,
         session=object(),
         token_service=token_service,
+        session_service=session_service,
     )
-    claims = {"user_id": str(user_id), "email": user.email, "role": "user"}
+    claims = {
+        "user_id": str(user_id),
+        "email": user.email,
+        "role": "user",
+        "session_id": session_id,
+        "family_id": family_id,
+    }
     if identity_type is not None:
         claims["identity_type"] = identity_type
     refresh_token = token_service.create_refresh_token(str(user_id), extra_claims=claims)
@@ -552,13 +568,14 @@ def test_auth_middleware_is_outer_to_admin_middleware() -> None:
 @pytest.mark.asyncio
 async def test_admin_middleware_receives_authenticated_admin_context(monkeypatch: pytest.MonkeyPatch) -> None:
     claims = {
-        "sub": "admin-uuid",
-        "user_id": "admin-uuid",
+        "sub": "11111111-1111-4111-8111-111111111111",
+        "user_id": "11111111-1111-4111-8111-111111111111",
         "email": "admin@example.com",
         "role": "admin",
         "identity_type": "admin",
         "type": "access",
         "exp": 2_000_000_000,
+        "session_id": "admin-session",
     }
 
     class FakeTokenService:
@@ -571,6 +588,17 @@ async def test_admin_middleware_receives_authenticated_admin_context(monkeypatch
             return False
 
     monkeypatch.setattr("app.middleware.auth_middleware.TokenService", FakeTokenService)
+    class FakeAuthSessionService:
+        async def validate_session(self, *, session_id: str) -> dict[str, str]:
+            assert session_id == "admin-session"
+            return {"user_id": "11111111-1111-4111-8111-111111111111"}
+
+    monkeypatch.setattr("app.middleware.auth_middleware.SessionService", FakeAuthSessionService)
+    async def current_admin(self: AdminMiddleware, admin_id: UUID) -> SimpleNamespace:
+        assert str(admin_id) == "11111111-1111-4111-8111-111111111111"
+        return SimpleNamespace(is_active=True, status="active", role="admin")
+
+    monkeypatch.setattr(AdminMiddleware, "_get_current_admin", current_admin)
     auth = AuthMiddleware(lambda *_: None, public_paths=[])
     admin = AdminMiddleware(lambda *_: None, allowed_roles=["admin"])
     scope = {
@@ -592,11 +620,62 @@ async def test_admin_middleware_receives_authenticated_admin_context(monkeypatch
 
     async def admin_dispatch(authenticated_request: Request) -> Response:
         assert authenticated_request.state.user.identity_type == "admin"
-        assert authenticated_request.state.user.user_id == "admin-uuid"
+        assert authenticated_request.state.user.user_id == "11111111-1111-4111-8111-111111111111"
         return await admin.dispatch(authenticated_request, endpoint)
 
     response = await auth.dispatch(request, admin_dispatch)
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_rejects_revoked_session_bound_access_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims = {
+        "sub": "user-uuid",
+        "user_id": "user-uuid",
+        "email": "user@example.com",
+        "role": "user",
+        "identity_type": "user",
+        "type": "access",
+        "exp": 2_000_000_000,
+        "session_id": "revoked-session",
+    }
+
+    class FakeTokenService:
+        def validate_token(self, token: str, *, expected_type: str) -> dict[str, object]:
+            return claims
+
+        async def check_revoked_token(self, *, token: str, fail_closed: bool = False) -> bool:
+            return False
+
+    class FakeSessionService:
+        async def validate_session(self, *, session_id: str) -> dict[str, object]:
+            assert session_id == "revoked-session"
+            raise AuthenticationException("Session is invalid.")
+
+    monkeypatch.setattr("app.middleware.auth_middleware.TokenService", FakeTokenService)
+    monkeypatch.setattr("app.middleware.auth_middleware.SessionService", FakeSessionService)
+    middleware = AuthMiddleware(lambda *_: None, public_paths=[])
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/users/me",
+        "raw_path": b"/users/me",
+        "query_string": b"",
+        "headers": [(b"authorization", b"Bearer valid-token")],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8000),
+        "scheme": "http",
+        "http_version": "1.1",
+    }
+    request = Request(scope)
+
+    async def endpoint(_: Request) -> Response:
+        return Response("ok", status_code=200)
+
+    response = await middleware.dispatch(request, endpoint)
+    assert response.status_code == 401
 
 
 @pytest.mark.parametrize(
@@ -621,12 +700,71 @@ async def test_admin_middleware_requires_admin_identity_and_allowed_role(
         "server": ("127.0.0.1", 8000),
         "scheme": "http",
         "http_version": "1.1",
-        "state": {"user": SimpleNamespace(identity_type=identity_type, role=role)},
+        "state": {
+            "user": SimpleNamespace(
+                identity_type=identity_type,
+                role=role,
+                user_id="11111111-1111-4111-8111-111111111111",
+            )
+        },
     }
     request = Request(scope)
 
     async def endpoint(_: Request) -> Response:
         return Response("ok", status_code=200)
 
+    async def current_admin(self: AdminMiddleware, admin_id: UUID) -> SimpleNamespace:
+        return SimpleNamespace(is_active=True, status="active", role=role)
+
+    middleware._get_current_admin = current_admin.__get__(middleware, AdminMiddleware)
+    response = await middleware.dispatch(request, endpoint)
+    assert response.status_code == expected_status
+
+
+@pytest.mark.parametrize(
+    ("current_role", "status", "is_active", "expected_status"),
+    [
+        ("super_admin", "active", True, 403),
+        ("admin", "suspended", True, 403),
+        ("admin", "active", False, 403),
+        ("admin", "active", True, 200),
+    ],
+)
+@pytest.mark.asyncio
+async def test_admin_middleware_revalidates_current_role_and_status(
+    current_role: str,
+    status: str,
+    is_active: bool,
+    expected_status: int,
+) -> None:
+    middleware = AdminMiddleware(lambda *_: None, allowed_roles=["admin", "super_admin"])
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/admin/users",
+        "raw_path": b"/admin/users",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8000),
+        "scheme": "http",
+        "http_version": "1.1",
+        "state": {
+            "user": SimpleNamespace(
+                identity_type="admin",
+                role="admin",
+                user_id="11111111-1111-4111-8111-111111111111",
+            )
+        },
+    }
+    request = Request(scope)
+
+    async def endpoint(_: Request) -> Response:
+        return Response("ok", status_code=200)
+
+    async def current_admin(self: AdminMiddleware, admin_id: UUID) -> SimpleNamespace:
+        return SimpleNamespace(is_active=is_active, status=status, role=current_role)
+
+    middleware._get_current_admin = current_admin.__get__(middleware, AdminMiddleware)
     response = await middleware.dispatch(request, endpoint)
     assert response.status_code == expected_status

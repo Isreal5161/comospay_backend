@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from app.repositories.admin_repository import AdminRepository
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.services.airtime_service import AirtimeService
+from app.services.admin.authorization import require_active_admin
 from app.services.data_service import DataService
 from app.services.education_service import EducationService
 from app.services.electricity_service import ElectricityService
@@ -28,6 +30,17 @@ from app.utils.exceptions import AuthorizationException, ValidationException
 
 class TransactionAdministrationService:
     """Service for transaction oversight and reversal operations."""
+
+    _LIST_SORT_FIELDS = {
+        "created_at",
+        "updated_at",
+        "status",
+        "amount",
+        "category",
+        "transaction_type",
+        "currency",
+        "reference",
+    }
 
     def __init__(
         self,
@@ -69,15 +82,38 @@ class TransactionAdministrationService:
         self._require_transaction_repository()
         await self._require_authorized_admin(payload)
 
-        page = max(1, int(payload.get("page") or 1))
-        page_size = max(1, min(100, int(payload.get("page_size") or 20)))
+        page = int(payload.get("page") or 1)
+        page_size = int(payload.get("page_size") or 20)
+        if page < 1:
+            raise ValidationException(detail="Page must be at least 1.", error_code="INVALID_PAGE")
+        if page_size < 1 or page_size > 100:
+            raise ValidationException(detail="Page size must be between 1 and 100.", error_code="INVALID_PAGE_SIZE")
         status = self._optional_text(payload.get("status"))
         category = self._optional_text(payload.get("category"))
         transaction_type = self._optional_text(payload.get("transaction_type"))
         reference = self._optional_text(payload.get("reference"))
         user_id = self._optional_text(payload.get("user_id"))
+        currency = self._optional_text(payload.get("currency"))
+        start_date = payload.get("start_date")
+        end_date = payload.get("end_date")
+        search = self._optional_text(payload.get("search"))
         order_by = str(payload.get("order_by") or "created_at")
         descending = bool(payload.get("descending", True))
+        if order_by not in self._LIST_SORT_FIELDS:
+            raise ValidationException(detail="Unsupported transaction sort field.", error_code="INVALID_SORT_FIELD")
+        if user_id is not None:
+            try:
+                user_id = str(UUID(user_id))
+            except ValueError as exc:
+                raise ValidationException(detail="User identifier is invalid.", error_code="INVALID_USER_ID") from exc
+        if currency is not None and (len(currency) < 3 or len(currency) > 10):
+            raise ValidationException(detail="Currency code is invalid.", error_code="INVALID_CURRENCY")
+        if start_date is not None and not isinstance(start_date, datetime):
+            raise ValidationException(detail="Start date is invalid.", error_code="INVALID_DATE_RANGE")
+        if end_date is not None and not isinstance(end_date, datetime):
+            raise ValidationException(detail="End date is invalid.", error_code="INVALID_DATE_RANGE")
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise ValidationException(detail="Start date must not be after end date.", error_code="INVALID_DATE_RANGE")
 
         items, total = await self.transaction_repository.get_admin_transactions(
             page=page,
@@ -87,6 +123,10 @@ class TransactionAdministrationService:
             transaction_type=transaction_type,
             reference=reference,
             user_id=user_id,
+            currency=currency,
+            start_date=start_date,
+            end_date=end_date,
+            search=search,
             order_by=order_by,
             descending=descending,
         )
@@ -94,9 +134,29 @@ class TransactionAdministrationService:
 
         return {
             "success": True,
-            "data": {"items": serialized_items, "total": total},
+            "data": {
+                "items": serialized_items,
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": (total + page_size - 1) // page_size,
+            },
             "meta": {"source": "admin.transactions", "page": page, "page_size": page_size},
         }
+
+    async def get_user_transaction_details(
+        self,
+        *,
+        user_id: UUID,
+        transaction_id: UUID,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        self._require_transaction_repository()
+        await self._require_authorized_admin(payload)
+        transaction = await self.transaction_repository.get_by_id(transaction_id)
+        if transaction is None or transaction.user_id != user_id:
+            raise ValidationException(detail="Transaction not found.", error_code="TRANSACTION_NOT_FOUND")
+        return self._serialize_transaction(transaction)
 
     async def get_transaction_details(self, *, transaction_id: UUID, **payload: Any) -> dict[str, Any]:
         self._require_transaction_repository()
@@ -491,10 +551,7 @@ class TransactionAdministrationService:
         except (ValueError, TypeError) as exc:
             raise AuthorizationException(detail="Admin identity is invalid.", error_code="ADMIN_ID_INVALID") from exc
 
-        if self.admin_repository is not None:
-            admin = await self.admin_repository.get_by_id(admin_id)
-            if admin is None or not bool(getattr(admin, "is_active", False)):
-                raise AuthorizationException(detail="Admin is not authorized.", error_code="ADMIN_NOT_AUTHORIZED")
+        await require_active_admin(self.admin_repository, admin_id)
         return admin_id
 
     def _resolve_transaction_owner(self, transaction: Transaction) -> str:

@@ -115,28 +115,51 @@ class UserRepository:
         page: int = 1,
         page_size: int = 20,
         status: str | None = None,
+        search: str | None = None,
         order_by: str = "created_at",
         descending: bool = True,
     ) -> tuple[list[User], int]:
-        """Retrieve paginated users with optional filtering and ordering."""
-        if page < 1:
-            page = 1
-        if page_size < 1:
-            page_size = 20
+        """Retrieve filtered users using database-side search, ordering, and pagination."""
+        sortable_columns = {
+            "first_name": User.first_name,
+            "last_name": User.last_name,
+            "email": User.email,
+            "username": User.username,
+            "phone": User.phone,
+            "status": User.status,
+            "created_at": User.created_at,
+            "updated_at": User.updated_at,
+            "last_login_at": User.last_login_at,
+        }
+        order_column = sortable_columns.get(order_by)
+        if order_column is None:
+            raise ValueError(f"Unsupported user sort field: {order_by}")
 
         query = select(User)
         if status:
             query = query.where(User.status == status)
+        if search and search.strip():
+            escaped_search = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            search_pattern = f"%{escaped_search}%"
+            query = query.where(
+                User.first_name.ilike(search_pattern, escape="\\")
+                | User.last_name.ilike(search_pattern, escape="\\")
+                | User.email.ilike(search_pattern, escape="\\")
+                | User.username.ilike(search_pattern, escape="\\")
+                | User.phone.ilike(search_pattern, escape="\\")
+            )
 
-        count_result = await self.session.execute(select(func.count(User.id)).select_from(query.subquery()))
+        filtered_query = query.order_by(None)
+        count_result = await self.session.execute(
+            select(func.count()).select_from(filtered_query.subquery())
+        )
         total = int(count_result.scalar_one() or 0)
 
-        order_column = getattr(User, order_by, User.created_at)
         if descending:
             order_column = order_column.desc()
 
         result = await self.session.execute(
-            query.order_by(order_column).offset((page - 1) * page_size).limit(page_size)
+            query.order_by(order_column, User.id).offset((page - 1) * page_size).limit(page_size)
         )
         users = list(result.scalars().all())
         return users, total

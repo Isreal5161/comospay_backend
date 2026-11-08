@@ -283,6 +283,10 @@ class TransactionRepository:
         transaction_type: str | None = None,
         reference: str | None = None,
         user_id: str | None = None,
+        currency: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        search: str | None = None,
         order_by: str = "created_at",
         descending: bool = True,
     ) -> tuple[list[Transaction], int]:
@@ -312,6 +316,25 @@ class TransactionRepository:
         if user_id:
             query = query.where(Transaction.user_id == UUID(user_id))
             count_query = count_query.where(Transaction.user_id == UUID(user_id))
+        if currency:
+            query = query.where(Transaction.currency == currency.upper())
+            count_query = count_query.where(Transaction.currency == currency.upper())
+        if start_date is not None:
+            query = query.where(Transaction.created_at >= start_date)
+            count_query = count_query.where(Transaction.created_at >= start_date)
+        if end_date is not None:
+            query = query.where(Transaction.created_at <= end_date)
+            count_query = count_query.where(Transaction.created_at <= end_date)
+        if search and search.strip():
+            escaped_search = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped_search}%"
+            search_filter = (
+                Transaction.reference.ilike(pattern, escape="\\")
+                | Transaction.provider_reference.ilike(pattern, escape="\\")
+                | Transaction.external_reference.ilike(pattern, escape="\\")
+            )
+            query = query.where(search_filter)
+            count_query = count_query.where(search_filter)
 
         order_mapping = {
             "created_at": Transaction.created_at,
@@ -320,8 +343,12 @@ class TransactionRepository:
             "amount": Transaction.amount,
             "category": Transaction.category,
             "transaction_type": Transaction.transaction_type,
+            "currency": Transaction.currency,
+            "reference": Transaction.reference,
         }
-        order_column = order_mapping.get(order_by, Transaction.created_at)
+        order_column = order_mapping.get(order_by)
+        if order_column is None:
+            raise ValueError(f"Unsupported transaction sort field: {order_by}")
         if descending:
             order_column = order_column.desc()
 
@@ -329,7 +356,7 @@ class TransactionRepository:
         total = int(total_result.scalar_one() or 0)
 
         result = await self.session.execute(
-            query.order_by(order_column).offset((page - 1) * page_size).limit(page_size)
+            query.order_by(order_column, Transaction.id).offset((page - 1) * page_size).limit(page_size)
         )
         return list(result.scalars().all()), total
 

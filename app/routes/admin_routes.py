@@ -2,11 +2,12 @@ from __future__ import annotations
 
 """Admin route registration for the CosmozPay backend."""
 
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 from uuid import UUID
 import importlib
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
@@ -43,7 +44,14 @@ from app.routes.electricity_routes import get_electricity_service
 from app.routes.payment_routes import get_payment_service
 from app.routes.tv_routes import get_tv_service
 from app.routes.wallet_routes import get_wallet_service
-from app.schemas.admin_schema import AdminCreate, AdminUpdate, DashboardResponse
+from app.schemas.admin_schema import (
+    AdminCreate,
+    AdminUpdate,
+    AdminUserDetailResponse,
+    AdminUserListResponse,
+    AdminUserManagementResponse,
+    DashboardResponse,
+)
 from app.schemas.api_key_schema import APIKeyCreate, APIKeyRevokeSchema, APIKeyUpdate
 from app.schemas.audit_log_schema import AuditLogFilterSchema
 from app.schemas.kyc_schema import KYCApprovalSchema
@@ -212,11 +220,14 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
                 notification_service=notification_service,
                 account_lockout_service=account_lockout_service,
                 account_state_service=account_state_service,
+                session_service=session_service,
                 session=session,
             ),
             kyc_service=KYCService(
                 logger=logger,
                 kyc_domain_service=kyc_domain_service,
+                kyc_repository=kyc_repository,
+                admin_repository=admin_repository,
                 notification_service=notification_service,
                 audit_repository=audit_repository,
                 session=session,
@@ -224,6 +235,7 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
             wallet_service=WalletAdministrationService(
                 logger=logger,
                 wallet_repository=wallet_repository,
+                ledger_repository=ledger_repository,
                 admin_repository=admin_repository,
                 audit_repository=audit_repository,
                 notification_service=notification_service,
@@ -351,41 +363,119 @@ async def get_current_admin(
     return await controller.get_me(request=request)
 
 
-@router.get("/users", status_code=status.HTTP_200_OK)
+@router.get(
+    "/users",
+    status_code=status.HTTP_200_OK,
+    response_model=AdminUserListResponse,
+)
 async def list_users(
     request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=200),
+    status: str | None = Query(default=None, max_length=50),
+    sort_by: Literal[
+        "first_name",
+        "last_name",
+        "email",
+        "username",
+        "phone",
+        "status",
+        "created_at",
+        "updated_at",
+        "last_login_at",
+    ] = "created_at",
+    sort_order: Literal["asc", "desc"] = "desc",
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
-    return await controller.list_users(request=request)
+    return await controller.list_users(
+        page=page,
+        page_size=page_size,
+        search=search,
+        status=status,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        request=request,
+    )
 
 
-@router.get("/users/{user_id}", status_code=status.HTTP_200_OK)
+@router.get(
+    "/users/{user_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=AdminUserDetailResponse,
+)
 async def get_user(
-    user_id: str,
+    user_id: UUID,
     request: Request,
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
-    return await controller.get_user(UUID(user_id), request=request)
+    return await controller.get_user(user_id, request=request)
 
 
-@router.post("/users/{user_id}/manage", status_code=status.HTTP_200_OK)
+@router.get("/users/{user_id}/activity", status_code=status.HTTP_200_OK)
+async def get_user_activity(
+    user_id: UUID,
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_user_activity(
+        user_id,
+        page=page,
+        page_size=page_size,
+        request=request,
+    )
+
+
+@router.post(
+    "/users/{user_id}/manage",
+    status_code=status.HTTP_200_OK,
+    response_model=AdminUserManagementResponse,
+)
 async def manage_user(
-    user_id: str,
+    user_id: UUID,
     payload: UserManagementRequest,
     request: Request,
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
-    return await controller.manage_user(UUID(user_id), payload, request=request)
+    return await controller.manage_user(user_id, payload, request=request)
 
 
-@router.post("/kyc/{user_id}/review", status_code=status.HTTP_200_OK)
+@router.get("/users/{user_id}/kyc", status_code=status.HTTP_200_OK)
+async def get_user_kyc(
+    user_id: UUID,
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_user_kyc(
+        user_id,
+        page=page,
+        page_size=page_size,
+        request=request,
+    )
+
+
+@router.get("/users/{user_id}/wallet", status_code=status.HTTP_200_OK)
+async def get_user_wallet_profile(
+    user_id: UUID,
+    request: Request,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_user_wallet_profile(user_id, request=request)
+
+
+@router.post("/users/{user_id}/kyc/{kyc_id}/review", status_code=status.HTTP_200_OK)
 async def review_kyc(
-    user_id: str,
+    user_id: UUID,
+    kyc_id: UUID,
     payload: KYCApprovalSchema,
     request: Request,
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
-    return await controller.review_kyc(UUID(user_id), payload, request=request)
+    return await controller.review_kyc(user_id, kyc_id, payload, request=request)
 
 
 @router.post("/wallets/adjust", status_code=status.HTTP_200_OK)
@@ -487,6 +577,30 @@ async def wallet_history(
     )
 
 
+@router.get("/users/{user_id}/wallets/{wallet_id}/ledger", status_code=status.HTTP_200_OK)
+async def get_user_ledger(
+    user_id: UUID,
+    wallet_id: UUID,
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    currency: str | None = Query(default=None, min_length=3, max_length=10),
+    status_filter: str | None = Query(default=None, alias="status", max_length=50),
+    entry_type: str | None = Query(default=None, max_length=50),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_user_ledger(
+        user_id=user_id,
+        wallet_id=wallet_id,
+        page=page,
+        page_size=page_size,
+        currency=currency,
+        status_filter=status_filter,
+        entry_type=entry_type,
+        request=request,
+    )
+
+
 @router.get("/wallets/{wallet_id}/analytics", status_code=status.HTTP_200_OK)
 async def wallet_analytics(
     wallet_id: str,
@@ -559,9 +673,86 @@ async def reconcile_wallet(
 @router.get("/transactions", status_code=status.HTTP_200_OK)
 async def list_transactions(
     request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    user_id: UUID | None = None,
+    status_filter: str | None = Query(default=None, alias="status", max_length=50),
+    category: str | None = Query(default=None, max_length=100),
+    transaction_type: str | None = Query(default=None, max_length=100),
+    currency: str | None = Query(default=None, min_length=3, max_length=10),
+    search: str | None = Query(default=None, max_length=255),
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    order_by: Literal[
+        "created_at",
+        "updated_at",
+        "status",
+        "amount",
+        "category",
+        "transaction_type",
+        "currency",
+        "reference",
+    ] = "created_at",
+    descending: bool = True,
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
-    return await controller.list_transactions(request=request)
+    return await controller.list_transactions(
+        page=page,
+        page_size=page_size,
+        user_id=user_id,
+        status=status_filter,
+        category=category,
+        transaction_type=transaction_type,
+        currency=currency,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+        order_by=order_by,
+        descending=descending,
+        request=request,
+    )
+
+@router.get("/users/{user_id}/transactions", status_code=status.HTTP_200_OK)
+async def list_user_transactions(
+    user_id: UUID,
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    status_filter: str | None = Query(default=None, alias="status", max_length=50),
+    category: str | None = Query(default=None, max_length=100),
+    transaction_type: str | None = Query(default=None, max_length=100),
+    currency: str | None = Query(default=None, min_length=3, max_length=10),
+    search: str | None = Query(default=None, max_length=255),
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    order_by: Literal[
+        "created_at",
+        "updated_at",
+        "status",
+        "amount",
+        "category",
+        "transaction_type",
+        "currency",
+        "reference",
+    ] = "created_at",
+    descending: bool = True,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.list_user_transactions(
+        user_id=user_id,
+        page=page,
+        page_size=page_size,
+        status=status_filter,
+        category=category,
+        transaction_type=transaction_type,
+        currency=currency,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+        order_by=order_by,
+        descending=descending,
+        request=request,
+    )
 
 
 @router.get("/transactions/{transaction_id}", status_code=status.HTTP_200_OK)
@@ -571,6 +762,16 @@ async def get_transaction_details(
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
     return await controller.get_transaction_details(UUID(transaction_id), request=request)
+
+
+@router.get("/users/{user_id}/transactions/{transaction_id}", status_code=status.HTTP_200_OK)
+async def get_user_transaction_details(
+    user_id: UUID,
+    transaction_id: UUID,
+    request: Request,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_user_transaction_details(user_id, transaction_id, request=request)
 
 
 @router.post("/transactions/{transaction_id}/reverse", status_code=status.HTTP_200_OK)
@@ -755,6 +956,22 @@ async def list_user_sessions(
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
     return await controller.list_user_sessions(UUID(user_id), request=request)
+
+
+@router.get("/users/{user_id}/sessions/history", status_code=status.HTTP_200_OK)
+async def get_user_session_history(
+    user_id: UUID,
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=50),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_user_session_history(
+        user_id,
+        page=page,
+        page_size=page_size,
+        request=request,
+    )
 
 
 @router.post("/users/{user_id}/sessions/revoke-all", status_code=status.HTTP_200_OK)

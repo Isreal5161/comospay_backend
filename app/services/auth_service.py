@@ -255,9 +255,18 @@ class AuthService:
                     )
 
                 await self._log_event("user_registered", user_id=user.id)
+                if self.session_service is None:
+                    raise DatabaseException("Session service is unavailable.")
+                session_payload = await self.session_service.create_session(
+                    user_id=str(user.id),
+                    metadata={"login_method": "registration"},
+                )
+                session_id = str(session_payload.get("session_id") or "")
+                if not session_id:
+                    raise DatabaseException("Registration session could not be created.")
                 return {
                     "user": self._serialize_user(user),
-                    "access_token": self._issue_access_token(user),
+                    "access_token": self._issue_access_token(user, session_id=session_id),
                     "token_type": "bearer",
                 }
         except Exception as exc:
@@ -410,6 +419,9 @@ class AuthService:
                         },
                     )
 
+            if not session_id:
+                raise DatabaseException("Authentication session could not be created.")
+
             if self.token_service is not None:
                 access_token = self.token_service.create_access_token(
                     str(user.id),
@@ -425,8 +437,8 @@ class AuthService:
                     family_id=refresh_token_family_id,
                 )
             else:
-                access_token = self._issue_access_token(user)
-                refresh_token = self._issue_refresh_token(user)
+                access_token = self._issue_access_token(user, session_id=session_id or "")
+                refresh_token = self._issue_refresh_token(user, session_id=session_id or "")
 
             await self._cache_token(refresh_token, token_type="refresh", user_id=user.id)
             await self._log_event(
@@ -812,11 +824,15 @@ class AuthService:
             raise AuthenticationException("Account is not active.")
 
         session_id = claims.get("session_id")
-        if session_id and self.session_service is not None:
+        if not session_id or self.session_service is None:
+            raise AuthenticationException("Session is invalid.")
+        if session_id:
             try:
-                await self.session_service.validate_session(session_id=session_id)
+                session = await self.session_service.validate_session(session_id=session_id)
             except Exception as exc:
                 raise AuthenticationException("Session is invalid.") from exc
+            if str(session.get("user_id") or "") != str(user.id):
+                raise AuthenticationException("Session is invalid.")
 
         device_id = claims.get("device_id")
         if device_id and self.device_service is not None:
@@ -858,9 +874,9 @@ class AuthService:
                         family_id=claims.get("family_id") or claims.get("token_family_id"),
                     )
             else:
-                access_token = self._issue_access_token(user)
+                access_token = self._issue_access_token(user, session_id=str(session_id))
                 await self._revoke_token(refresh_token, token_type="refresh")
-                new_refresh_token = self._issue_refresh_token(user)
+                new_refresh_token = self._issue_refresh_token(user, session_id=str(session_id))
 
             if new_refresh_token:
                 await self._cache_token(new_refresh_token, token_type="refresh", user_id=user.id)
@@ -2122,7 +2138,7 @@ class AuthService:
             return None
         return str(jti)
 
-    def _issue_access_token(self, user: User) -> str:
+    def _issue_access_token(self, user: User, *, session_id: str) -> str:
         return self.jwt_utils.create_access_token(
             str(user.id),
             extra_claims={
@@ -2131,16 +2147,18 @@ class AuthService:
                 "email_verified": user.email_verified,
                 "role": getattr(user, "role", None) or "user",
                 "jti": uuid4().hex,
+                "session_id": session_id,
             },
         )
 
-    def _issue_refresh_token(self, user: User) -> str:
+    def _issue_refresh_token(self, user: User, *, session_id: str) -> str:
         return self.jwt_utils.create_refresh_token(
             str(user.id),
             extra_claims={
                 "email": user.email,
                 "user_id": str(user.id),
                 "jti": uuid4().hex,
+                "session_id": session_id,
             },
         )
 

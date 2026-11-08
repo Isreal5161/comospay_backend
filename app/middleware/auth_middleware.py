@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 from app.config.jwt import decode_token
 from app.config.redis import get_redis
 from app.config.settings import settings
+from app.services.auth.session_service import SessionService
 from app.services.auth.token_service import TokenService
 from app.utils.logger import get_logger
 from app.utils.response import error_response
@@ -85,6 +86,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
             self._log_auth_failure(request, "Token is revoked.", "token_revocation")
             return self._unauthorized_response(request, "Authentication token has been revoked.")
 
+        session_id = claims.get("session_id")
+        if session_id:
+            try:
+                session = await SessionService().validate_session(session_id=str(session_id))
+            except Exception:
+                self._log_auth_failure(request, "Token session could not be validated.", "session_validation")
+                return self._unauthorized_response(request, "Authentication session is invalid.")
+            if str(session.get("user_id") or "") != str(claims.get("user_id") or claims.get("sub") or ""):
+                self._log_auth_failure(request, "Token session identity did not match.", "session_identity_mismatch")
+                return self._unauthorized_response(request, "Authentication session is invalid.")
+
         if not self._validate_payload(claims):
             self._log_auth_failure(request, "Token payload validation failed.", "payload_validation")
             return self._unauthorized_response(request, "Authentication token is invalid.")
@@ -120,6 +132,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         token_type = str(payload.get("type") or "")
         if token_type != "access":
+            return False
+
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
             return False
 
         identity_type = str(payload.get("identity_type") or "user")

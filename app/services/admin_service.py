@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -119,14 +120,27 @@ class AdminService:
     async def get_user(self, *, user_id, **payload: Any) -> dict[str, Any]:
         return await self.user_service.get_user(user_id=user_id, **payload)
 
+    async def get_user_activity(self, *, user_id, **payload: Any) -> dict[str, Any]:
+        return await self.user_service.get_user_activity(user_id=user_id, **payload)
+
     async def manage_user(self, *, user_id, action: str, **payload: Any) -> dict[str, Any]:
         return await self.user_service.manage_user(user_id=user_id, action=action, **payload)
 
-    async def review_kyc(self, *, user_id, action: str, **payload: Any) -> dict[str, Any]:
-        return await self.kyc_service.review_kyc(user_id=user_id, action=action, **payload)
+    async def review_kyc(self, *, user_id, kyc_id, action: str, **payload: Any) -> dict[str, Any]:
+        return await self.kyc_service.review_kyc(user_id=user_id, kyc_id=kyc_id, action=action, **payload)
 
-    async def adjust_wallet(self, *, user_id, amount: float, reason: str, **payload: Any) -> dict[str, Any]:
-        return await self.wallet_service.adjust_wallet(user_id=user_id, amount=amount, reason=reason, **payload)
+    async def get_user_kyc(self, *, user_id, **payload: Any) -> dict[str, Any]:
+        return await self.kyc_service.get_user_kyc(user_id=user_id, **payload)
+
+    async def adjust_wallet(self, *, user_id, wallet_id, amount: Decimal, currency: str, reason: str, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.adjust_wallet(
+            user_id=user_id,
+            wallet_id=wallet_id,
+            amount=amount,
+            currency=currency,
+            reason=reason,
+            **payload,
+        )
 
     async def list_wallets(self, **payload: Any) -> dict[str, Any]:
         return await self.wallet_service.list_wallets(**payload)
@@ -137,11 +151,21 @@ class AdminService:
     async def get_user_wallet(self, *, user_id, **payload: Any) -> dict[str, Any]:
         return await self.wallet_service.get_user_wallet(user_id=user_id, **payload)
 
+    async def get_user_wallet_profile(self, *, user_id, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.get_user_wallet_profile(user_id=user_id, **payload)
+
     async def search_wallets(self, *, query: str, **payload: Any) -> dict[str, Any]:
         return await self.wallet_service.search_wallets(query=query, **payload)
 
     async def wallet_history(self, *, wallet_id, **payload: Any) -> dict[str, Any]:
         return await self.wallet_service.wallet_history(wallet_id=wallet_id, **payload)
+
+    async def get_user_ledger(self, *, user_id, wallet_id, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.get_user_ledger(
+            user_id=user_id,
+            wallet_id=wallet_id,
+            **payload,
+        )
 
     async def wallet_analytics(self, *, wallet_id, **payload: Any) -> dict[str, Any]:
         return await self.wallet_service.wallet_analytics(wallet_id=wallet_id, **payload)
@@ -166,6 +190,19 @@ class AdminService:
 
     async def get_transaction_details(self, *, transaction_id, **payload: Any) -> dict[str, Any]:
         return await self.transaction_service.get_transaction_details(transaction_id=transaction_id, **payload)
+
+    async def get_user_transaction_details(
+        self,
+        *,
+        user_id,
+        transaction_id,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        return await self.transaction_service.get_user_transaction_details(
+            user_id=user_id,
+            transaction_id=transaction_id,
+            **payload,
+        )
 
     async def reverse_transaction(self, *, transaction_id: str, **payload: Any) -> dict[str, Any]:
         return await self.transaction_service.reverse_transaction(transaction_id=transaction_id, **payload)
@@ -226,6 +263,9 @@ class AdminService:
 
     async def list_user_sessions(self, *, user_id, **payload: Any) -> dict[str, Any]:
         return await self.session_service.get_user_sessions(user_id=user_id, **payload)
+
+    async def get_user_session_history(self, *, user_id, **payload: Any) -> dict[str, Any]:
+        return await self.session_service.get_user_session_history(user_id=user_id, **payload)
 
     async def revoke_all_user_sessions(self, *, user_id, **payload: Any) -> dict[str, Any]:
         return await self.session_service.revoke_all_user_sessions(user_id=user_id, **payload)

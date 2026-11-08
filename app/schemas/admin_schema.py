@@ -70,6 +70,68 @@ class AdminPasswordChangeSchema(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=255, description="New password.")
 
 
+class AdminUserResponse(BaseModel):
+    """Safe user fields exposed to authorized administrators."""
+
+    id: UUID
+    first_name: str | None
+    last_name: str | None
+    email: str
+    username: str | None
+    phone: str | None
+    status: str
+    is_active: bool
+    is_blocked: bool
+    is_suspended: bool
+    is_email_verified: bool
+    is_phone_verified: bool
+    last_login_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AdminUserListData(BaseModel):
+    """Filtered, paginated admin user listing."""
+
+    items: list[AdminUserResponse]
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+
+
+class AdminUserListResponse(BaseModel):
+    """Standard API envelope for admin user listings."""
+
+    success: bool
+    message: str
+    data: AdminUserListData
+    status_code: int
+
+
+class AdminUserDetailResponse(BaseModel):
+    """Standard API envelope for an admin user profile."""
+
+    success: bool
+    message: str
+    data: AdminUserResponse
+    status_code: int
+
+
+class AdminUserManagementData(BaseModel):
+    user: AdminUserResponse
+    action: str
+
+
+class AdminUserManagementResponse(BaseModel):
+    """Standard API envelope for account-state management."""
+
+    success: bool
+    message: str
+    data: AdminUserManagementData
+    status_code: int
+
+
 class DashboardPeriod(BaseModel):
     """Half-open reporting window in the Africa/Lagos timezone."""
 

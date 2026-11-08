@@ -8,6 +8,7 @@ from uuid import UUID
 from app.models.audit_log import AuditLog
 from app.repositories.admin_repository import AdminRepository
 from app.repositories.audit_log_repository import AuditLogRepository
+from app.services.admin.authorization import require_active_admin
 from app.services.auth.session_service import SessionService
 from app.services.auth.session_service import SessionNotFoundException, SessionRevokedException
 from app.utils.exceptions import AuthorizationException, ValidationException
@@ -75,8 +76,53 @@ class SessionAdministrationService:
         sessions = await self.session_service.get_active_sessions(user_id=user_identifier)
         return {
             "success": True,
-            "data": sessions,
+            "data": [
+                {
+                    "status": session.get("status"),
+                    "created_at": session.get("created_at"),
+                    "last_activity_at": session.get("last_activity_at"),
+                    "expires_at": session.get("expires_at"),
+                    "device_name": session.get("device_name"),
+                    "browser": session.get("browser"),
+                    "operating_system": session.get("operating_system"),
+                }
+                for session in sessions
+            ],
             "meta": {"source": "admin.sessions", "action": "list_user_sessions", "user_id": user_identifier},
+        }
+
+    async def get_user_session_history(
+        self,
+        *,
+        user_id: str | UUID,
+        page: int = 1,
+        page_size: int = 20,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        self._require_session_service()
+        await self._require_authorized_admin(payload)
+        if page < 1 or page_size < 1 or page_size > 50:
+            raise ValidationException(detail="Invalid session history pagination.", error_code="INVALID_PAGINATION")
+        history = await self.session_service.get_session_history(user_id=str(user_id))
+        total = len(history)
+        start = (page - 1) * page_size
+        items = history[start : start + page_size]
+        return {
+            "success": True,
+            "data": {
+                "items": [
+                    {
+                        "action": item.get("action"),
+                        "timestamp": item.get("timestamp"),
+                    }
+                    for item in items
+                ],
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": (total + page_size - 1) // page_size,
+            },
+            "meta": {"source": "admin.sessions", "action": "list_user_session_history"},
         }
 
     async def revoke_all_user_sessions(self, *, user_id: str | UUID, reason: str | None = None, **payload: Any) -> dict[str, Any]:
@@ -129,10 +175,7 @@ class SessionAdministrationService:
         except (ValueError, TypeError) as exc:
             raise AuthorizationException(detail="Admin identity is invalid.", error_code="ADMIN_ID_INVALID") from exc
 
-        if self.admin_repository is not None:
-            admin = await self.admin_repository.get_by_id(admin_id)
-            if admin is None or not bool(getattr(admin, "is_active", False)):
-                raise AuthorizationException(detail="Admin is not authorized.", error_code="ADMIN_NOT_AUTHORIZED")
+        await require_active_admin(self.admin_repository, admin_id)
         return admin_id
 
     def _require_session_service(self) -> None:

@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from decimal import Decimal
 from typing import Any, Awaitable, Callable, Protocol, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from app.schemas.admin_schema import AdminCreate, AdminUpdate, DashboardResponse
+from app.schemas.admin_schema import (
+    AdminCreate,
+    AdminUpdate,
+    AdminUserDetailResponse,
+    AdminUserListResponse,
+    AdminUserManagementResponse,
+    DashboardResponse,
+)
 from app.schemas.api_key_schema import APIKeyCreate, APIKeyRevokeSchema, APIKeyUpdate
 from app.schemas.audit_log_schema import AuditLogFilterSchema
 from app.schemas.kyc_schema import KYCApprovalSchema
@@ -41,10 +50,11 @@ class WalletAdjustmentRequest(BaseModel):
     """Request schema for wallet adjustment operations."""
 
     user_id: UUID = Field(..., description="Identifier of the affected user.")
-    amount: float = Field(..., description="Adjustment amount.")
-    currency: str = Field(default="NGN", min_length=3, max_length=3, description="Currency code.")
-    reason: str = Field(..., description="Reason for the adjustment.")
-    reference: str | None = Field(default=None, description="Optional reference value.")
+    wallet_id: UUID = Field(..., description="Identifier of the affected wallet.")
+    amount: Decimal = Field(..., description="Adjustment amount; negative values debit the wallet.")
+    currency: str = Field(..., min_length=3, max_length=10, description="Currency code.")
+    reason: str = Field(..., min_length=1, max_length=500, description="Reason for the adjustment.")
+    reference: str = Field(..., min_length=1, max_length=100, description="Idempotency reference for the adjustment.")
 
 
 class WalletStateChangeRequest(BaseModel):
@@ -136,10 +146,22 @@ class AdminController:
             response_model=DashboardResponse,
         )(self.get_dashboard)
         self.router.get("/me", status_code=status.HTTP_200_OK)(self.get_me)
-        self.router.get("/users", status_code=status.HTTP_200_OK)(self.list_users)
-        self.router.get("/users/{user_id}", status_code=status.HTTP_200_OK)(self.get_user)
-        self.router.post("/users/{user_id}/manage", status_code=status.HTTP_200_OK)(self.manage_user)
-        self.router.post("/kyc/{user_id}/review", status_code=status.HTTP_200_OK)(self.review_kyc)
+        self.router.get(
+            "/users",
+            status_code=status.HTTP_200_OK,
+            response_model=AdminUserListResponse,
+        )(self.list_users)
+        self.router.get(
+            "/users/{user_id}",
+            status_code=status.HTTP_200_OK,
+            response_model=AdminUserDetailResponse,
+        )(self.get_user)
+        self.router.post(
+            "/users/{user_id}/manage",
+            status_code=status.HTTP_200_OK,
+            response_model=AdminUserManagementResponse,
+        )(self.manage_user)
+        self.router.post("/users/{user_id}/kyc/{kyc_id}/review", status_code=status.HTTP_200_OK)(self.review_kyc)
         self.router.post("/wallets/adjust", status_code=status.HTTP_200_OK)(self.adjust_wallet)
         self.router.get("/wallets", status_code=status.HTTP_200_OK)(self.list_wallets)
         self.router.get("/wallets/search", status_code=status.HTTP_200_OK)(self.search_wallets)
@@ -153,6 +175,7 @@ class AdminController:
         self.router.post("/wallets/{wallet_id}/unlock", status_code=status.HTTP_200_OK)(self.unlock_wallet)
         self.router.post("/wallets/{wallet_id}/reconcile", status_code=status.HTTP_200_OK)(self.reconcile_wallet)
         self.router.get("/transactions", status_code=status.HTTP_200_OK)(self.list_transactions)
+        self.router.get("/users/{user_id}/transactions", status_code=status.HTTP_200_OK)(self.list_user_transactions)
         self.router.get("/transactions/{transaction_id}", status_code=status.HTTP_200_OK)(self.get_transaction_details)
         self.router.post("/transactions/{transaction_id}/reverse", status_code=status.HTTP_200_OK)(self.reverse_transaction)
         self.router.post("/transactions/{transaction_id}/retry", status_code=status.HTTP_200_OK)(self.retry_failed_transaction)
@@ -205,13 +228,32 @@ class AdminController:
             success_message="Admin profile retrieved successfully.",
         )
 
-    async def list_users(self, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
+    async def list_users(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        status: str | None = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
         """Handle user management listing requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
             action="list_users",
             handler=self._resolve_handler("list_users"),
-            payload={"admin_id": target_admin_id},
+            payload={
+                "admin_id": target_admin_id,
+                "page": page,
+                "page_size": page_size,
+                "search": search,
+                "status": status,
+                "sort_by": sort_by,
+                "sort_order": sort_order,
+            },
             success_message="Users retrieved successfully.",
         )
 
@@ -223,6 +265,28 @@ class AdminController:
             handler=self._resolve_handler("get_user"),
             payload={"admin_id": target_admin_id, "user_id": user_id},
             success_message="User retrieved successfully.",
+        )
+
+    async def get_user_activity(
+        self,
+        user_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="get_user_activity",
+            handler=self._resolve_handler("get_user_activity"),
+            payload={
+                "admin_id": target_admin_id,
+                "user_id": user_id,
+                "page": page,
+                "page_size": page_size,
+            },
+            success_message="User admin activity retrieved successfully.",
         )
 
     async def manage_user(self, user_id: UUID, payload: UserManagementRequest, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
@@ -242,7 +306,15 @@ class AdminController:
             success_message="User management action completed successfully.",
         )
 
-    async def review_kyc(self, user_id: UUID, payload: KYCApprovalSchema, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
+    async def review_kyc(
+        self,
+        user_id: UUID,
+        kyc_id: UUID,
+        payload: KYCApprovalSchema,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
         """Handle KYC approval and rejection requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
@@ -251,10 +323,33 @@ class AdminController:
             payload={
                 "admin_id": target_admin_id,
                 "user_id": user_id,
+                "kyc_id": kyc_id,
                 "action": payload.approval_status,
                 "review_notes": payload.review_notes,
             },
             success_message="KYC review completed successfully.",
+        )
+
+    async def get_user_kyc(
+        self,
+        user_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="get_user_kyc",
+            handler=self._resolve_handler("get_user_kyc"),
+            payload={
+                "admin_id": target_admin_id,
+                "user_id": user_id,
+                "page": page,
+                "page_size": page_size,
+            },
+            success_message="User KYC records retrieved successfully.",
         )
 
     async def adjust_wallet(self, payload: WalletAdjustmentRequest, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
@@ -266,6 +361,7 @@ class AdminController:
             payload={
                 "admin_id": target_admin_id,
                 "user_id": payload.user_id,
+                "wallet_id": payload.wallet_id,
                 "amount": payload.amount,
                 "currency": payload.currency,
                 "reason": payload.reason,
@@ -327,6 +423,21 @@ class AdminController:
             success_message="User wallet retrieved successfully.",
         )
 
+    async def get_user_wallet_profile(
+        self,
+        user_id: UUID,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="get_user_wallet_profile",
+            handler=self._resolve_handler("get_user_wallet_profile"),
+            payload={"admin_id": target_admin_id, "user_id": user_id},
+            success_message="User wallet profile retrieved successfully.",
+        )
+
     async def search_wallets(
         self,
         query: str,
@@ -385,6 +496,36 @@ class AdminController:
                 "sort_desc": sort_desc,
             },
             success_message="Wallet history retrieved successfully.",
+        )
+
+    async def get_user_ledger(
+        self,
+        user_id: UUID,
+        wallet_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+        currency: str | None = None,
+        status_filter: str | None = None,
+        entry_type: str | None = None,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="get_user_ledger",
+            handler=self._resolve_handler("get_user_ledger"),
+            payload={
+                "admin_id": target_admin_id,
+                "user_id": user_id,
+                "wallet_id": wallet_id,
+                "page": page,
+                "page_size": page_size,
+                "currency": currency,
+                "status": status_filter,
+                "entry_type": entry_type,
+            },
+            success_message="Wallet ledger retrieved successfully.",
         )
 
     async def wallet_analytics(
@@ -494,14 +635,98 @@ class AdminController:
             success_message="Wallet reconciliation completed successfully.",
         )
 
-    async def list_transactions(self, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
+    async def list_transactions(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        user_id: UUID | None = None,
+        status: str | None = None,
+        category: str | None = None,
+        transaction_type: str | None = None,
+        currency: str | None = None,
+        search: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        order_by: str = "created_at",
+        descending: bool = True,
+        admin_id: UUID | None = None,
+        request: Request,
+    ) -> dict[str, Any]:
         """Handle transaction monitoring requests."""
         target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
         return await self._execute(
             action="list_transactions",
             handler=self._resolve_handler("list_transactions"),
-            payload={"admin_id": target_admin_id},
+            payload={
+                "admin_id": target_admin_id,
+                "page": page,
+                "page_size": page_size,
+                "user_id": str(user_id) if user_id else None,
+                "status": status,
+                "category": category,
+                "transaction_type": transaction_type,
+                "currency": currency,
+                "search": search,
+                "start_date": start_date,
+                "end_date": end_date,
+                "order_by": order_by,
+                "descending": descending,
+            },
             success_message="Transactions retrieved successfully.",
+        )
+
+    async def list_user_transactions(
+        self,
+        user_id: UUID,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        status: str | None = None,
+        category: str | None = None,
+        transaction_type: str | None = None,
+        currency: str | None = None,
+        search: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        order_by: str = "created_at",
+        descending: bool = True,
+        request: Request,
+    ) -> dict[str, Any]:
+        return await self.list_transactions(
+            page=page,
+            page_size=page_size,
+            user_id=user_id,
+            status=status,
+            category=category,
+            transaction_type=transaction_type,
+            currency=currency,
+            search=search,
+            start_date=start_date,
+            end_date=end_date,
+            order_by=order_by,
+            descending=descending,
+            request=request,
+        )
+
+    async def get_user_transaction_details(
+        self,
+        user_id: UUID,
+        transaction_id: UUID,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="get_user_transaction_details",
+            handler=self._resolve_handler("get_user_transaction_details"),
+            payload={
+                "admin_id": target_admin_id,
+                "user_id": user_id,
+                "transaction_id": transaction_id,
+            },
+            success_message="User transaction retrieved successfully.",
         )
 
     async def reverse_transaction(self, transaction_id: UUID, payload: TransactionReverseRequest, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:
@@ -728,6 +953,28 @@ class AdminController:
             handler=self._resolve_handler("list_user_sessions"),
             payload={"admin_id": target_admin_id, "user_id": user_id},
             success_message="User sessions retrieved successfully.",
+        )
+
+    async def get_user_session_history(
+        self,
+        user_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="get_user_session_history",
+            handler=self._resolve_handler("get_user_session_history"),
+            payload={
+                "admin_id": target_admin_id,
+                "user_id": user_id,
+                "page": page,
+                "page_size": page_size,
+            },
+            success_message="User session history retrieved successfully.",
         )
 
     async def revoke_all_user_sessions(self, user_id: UUID, reason: str | None = None, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Iterable
+from uuid import UUID
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from app.config.database import AsyncSessionFactory
+from app.models.admin import Admin
+from app.repositories.admin_repository import AdminRepository
 from app.utils.logger import get_logger
 from app.utils.response import error_response
 
@@ -38,7 +42,38 @@ class AdminMiddleware(BaseHTTPMiddleware):
             self._log_authorization_failure(request, f"Role '{role}' is not authorized.", "role_denied")
             return self._forbidden_response(request, "You are not authorized to access this resource.")
 
+        try:
+            admin_id = UUID(str(getattr(user, "user_id", "")))
+        except (ValueError, TypeError):
+            self._log_authorization_failure(request, "Admin identity is invalid.", "admin_identity_invalid")
+            return self._forbidden_response(request, "You are not authorized to access this resource.")
+
+        try:
+            admin = await self._get_current_admin(admin_id)
+        except Exception as exc:
+            self._log_authorization_failure(
+                request,
+                f"Current admin authorization could not be verified ({type(exc).__name__}).",
+                "current_admin_lookup_failed",
+            )
+            return self._authorization_unavailable_response(request)
+
+        current_role = self._normalize_role(str(getattr(admin, "role", "") or "")) if admin else ""
+        if (
+            admin is None
+            or not bool(getattr(admin, "is_active", False))
+            or str(getattr(admin, "status", "") or "").strip().lower() != "active"
+            or current_role != role
+            or not self._is_authorized(current_role)
+        ):
+            self._log_authorization_failure(request, "Current admin state does not authorize this request.", "current_admin_state_denied")
+            return self._forbidden_response(request, "You are not authorized to access this resource.")
+
         return await call_next(request)
+
+    async def _get_current_admin(self, admin_id: UUID) -> Admin | None:
+        async with AsyncSessionFactory() as session:
+            return await AdminRepository(session).get_by_id(admin_id)
 
     def _should_skip(self, request: Request) -> bool:
         path = self._normalize_path(request.url.path)
@@ -65,6 +100,13 @@ class AdminMiddleware(BaseHTTPMiddleware):
         if request_id:
             payload["request_id"] = request_id
         return JSONResponse(content=payload, status_code=403)
+
+    def _authorization_unavailable_response(self, request: Request) -> JSONResponse:
+        payload = error_response(message="Admin authorization could not be verified.", status_code=503)
+        request_id = self._request_id(request)
+        if request_id:
+            payload["request_id"] = request_id
+        return JSONResponse(content=payload, status_code=503)
 
     def _log_authorization_failure(self, request: Request, message: str, reason: str) -> None:
         try:

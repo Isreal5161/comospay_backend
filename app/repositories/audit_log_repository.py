@@ -60,6 +60,29 @@ class AuditLogRepository:
         audit_logs = list(result.scalars().all())
         return audit_logs, total
 
+    async def get_user_resource_audit_logs(
+        self,
+        *,
+        user_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[AuditLog], int]:
+        """Return admin audit events explicitly recorded against one user resource."""
+        query = select(AuditLog).where(
+            AuditLog.resource_type == "user",
+            AuditLog.resource_id == str(user_id),
+        )
+        count_result = await self.session.execute(
+            select(func.count()).select_from(query.order_by(None).subquery())
+        )
+        total = int(count_result.scalar_one() or 0)
+        result = await self.session.execute(
+            query.order_by(AuditLog.created_at.desc(), AuditLog.id)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        return list(result.scalars().all()), total
+
     async def get_admin_audit_logs(
         self,
         *,

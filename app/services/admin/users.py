@@ -14,8 +14,10 @@ from app.repositories.admin_repository import AdminRepository
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.user_repository import UserRepository
 from app.services.account_state import UserAccountStateService
+from app.services.admin.authorization import require_active_admin
 from app.services.kyc_helpers import get_user_or_raise
 from app.services.notification_service import NotificationService
+from app.services.auth.session_service import SessionService
 from app.services.security.account_lockout import AccountLockoutService
 from app.utils.exceptions import AuthorizationException, ValidationException
 
@@ -24,6 +26,17 @@ class UserAdministrationService:
     """Service for managing user accounts from the admin console."""
 
     _LOCK_ACTIONS = {"lock", "unlock", "lock_account", "unlock_account"}
+    _SORT_FIELDS = {
+        "first_name",
+        "last_name",
+        "email",
+        "username",
+        "phone",
+        "status",
+        "created_at",
+        "updated_at",
+        "last_login_at",
+    }
 
     def __init__(
         self,
@@ -34,6 +47,7 @@ class UserAdministrationService:
         notification_service: NotificationService | None = None,
         account_lockout_service: AccountLockoutService | None = None,
         account_state_service: UserAccountStateService | None = None,
+        session_service: SessionService | None = None,
         session: AsyncSession | None = None,
     ) -> None:
         self.logger = logger or logging.getLogger(__name__)
@@ -43,6 +57,7 @@ class UserAdministrationService:
         self.notification_service = notification_service
         self.account_lockout_service = account_lockout_service
         self.account_state_service = account_state_service
+        self.session_service = session_service
         self.session = session
 
     async def list_users(self, **payload: Any) -> dict[str, Any]:
@@ -50,33 +65,85 @@ class UserAdministrationService:
         if self.user_repository is None:
             raise ValidationException(detail="User repository is unavailable.", error_code="USER_ADMIN_UNAVAILABLE")
 
-        page = int(payload.get("page") or 1)
-        page_size = int(payload.get("page_size") or 20)
+        page = int(payload.get("page", 1))
+        page_size = int(payload.get("page_size", 20))
+        if page < 1:
+            raise ValidationException(detail="Page must be at least 1.", error_code="INVALID_PAGE")
+        if page_size < 1 or page_size > 100:
+            raise ValidationException(
+                detail="Page size must be between 1 and 100.",
+                error_code="INVALID_PAGE_SIZE",
+            )
+
         status = payload.get("status")
-        order_by = str(payload.get("order_by") or "created_at")
-        descending = bool(payload.get("descending", True))
+        search = payload.get("search")
+        sort_by = str(payload.get("sort_by") or "created_at")
+        sort_order = str(payload.get("sort_order") or "desc").lower()
+        if sort_by not in self._SORT_FIELDS:
+            raise ValidationException(detail="Unsupported user sort field.", error_code="INVALID_SORT_FIELD")
+        if sort_order not in {"asc", "desc"}:
+            raise ValidationException(detail="Sort order must be 'asc' or 'desc'.", error_code="INVALID_SORT_ORDER")
 
         users, total = await self.user_repository.get_all_users(
             page=page,
             page_size=page_size,
             status=str(status) if status is not None else None,
-            order_by=order_by,
-            descending=descending,
+            search=str(search) if search is not None else None,
+            order_by=sort_by,
+            descending=sort_order == "desc",
         )
         return {
-            "success": True,
-            "data": {
-                "items": [self._serialize_user(user) for user in users],
-                "total": total,
-            },
-            "meta": {"source": "admin.users", "page": page, "page_size": page_size},
+            "items": [self._serialize_user(user) for user in users],
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size,
         }
 
     async def get_user(self, *, user_id: UUID, **payload: Any) -> dict[str, Any]:
         self._require_user_repository()
         await self._require_authorized_admin(payload)
         user = await self._get_user_or_raise(user_id=user_id)
-        return {"success": True, "data": self._serialize_user(user), "meta": {"source": "admin.users"}}
+        return self._serialize_user(user)
+
+    async def get_user_activity(
+        self,
+        *,
+        user_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        await self._require_authorized_admin(payload)
+        if self.user_repository is None or self.audit_repository is None:
+            raise ValidationException(detail="User activity is unavailable.", error_code="USER_ACTIVITY_UNAVAILABLE")
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise ValidationException(detail="Invalid activity pagination.", error_code="INVALID_PAGINATION")
+        await self._get_user_or_raise(user_id=user_id)
+        events, total = await self.audit_repository.get_user_resource_audit_logs(
+            user_id=user_id,
+            page=page,
+            page_size=page_size,
+        )
+        return {
+            "items": [
+                {
+                    "id": str(event.id),
+                    "action": event.action,
+                    "category": event.category,
+                    "description": event.description,
+                    "actor_type": event.actor_type,
+                    "actor_id": event.actor_id,
+                    "created_at": event.created_at.isoformat() if event.created_at else None,
+                }
+                for event in events
+            ],
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size,
+            "source": "admin_audit",
+        }
 
     async def manage_user(self, *, user_id: UUID, action: str, **payload: Any) -> dict[str, Any]:
         self._require_user_repository()
@@ -99,6 +166,16 @@ class UserAdministrationService:
             user = await self._get_user_or_raise(user_id=user_id)
             old_payload = self._serialize_user(user)
             updates = self.account_state_service.resolve_state_updates(action=normalized_action)
+            if normalized_action in {"block", "suspend"}:
+                if self.session_service is None:
+                    raise ValidationException(
+                        detail="Session revocation service is unavailable.",
+                        error_code="SESSION_ADMIN_UNAVAILABLE",
+                    )
+                await self.session_service.revoke_all_user_sessions(
+                    user_id=str(user.id),
+                    reason=f"admin_user_{normalized_action}",
+                )
             updates["metadata_payload"] = self._merge_management_metadata(
                 current=user.metadata_payload,
                 action=normalized_action,
@@ -126,13 +203,8 @@ class UserAdministrationService:
         await self._notify_user(user=user, action=normalized_action, reason=reason)
 
         return {
-            "success": True,
-            "data": {
-                "user": self._serialize_user(user),
-                "action": normalized_action,
-                "result": result,
-            },
-            "meta": {"source": "admin.users"},
+            "user": self._serialize_user(user),
+            "action": normalized_action,
         }
 
     async def _handle_lock_action(
@@ -178,10 +250,7 @@ class UserAdministrationService:
         except (ValueError, TypeError) as exc:
             raise AuthorizationException(detail="Admin identity is invalid.", error_code="ADMIN_ID_INVALID") from exc
 
-        if self.admin_repository is not None:
-            admin = await self.admin_repository.get_by_id(admin_id)
-            if admin is None or not bool(getattr(admin, "is_active", False)):
-                raise AuthorizationException(detail="Admin is not authorized.", error_code="ADMIN_NOT_AUTHORIZED")
+        await require_active_admin(self.admin_repository, admin_id)
         return admin_id
 
     def _normalize_action(self, action: str) -> str:
@@ -306,10 +375,8 @@ class UserAdministrationService:
             "is_active": user.is_active,
             "is_blocked": user.is_blocked,
             "is_suspended": user.is_suspended,
-            "email_verified": user.email_verified,
-            "phone_verified": user.phone_verified,
-            "account_locked_until": user.account_locked_until.isoformat() if user.account_locked_until else None,
-            "failed_login_attempts": user.failed_login_attempts,
+            "is_email_verified": user.email_verified,
+            "is_phone_verified": user.phone_verified,
             "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "updated_at": user.updated_at.isoformat() if user.updated_at else None,

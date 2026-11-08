@@ -215,6 +215,7 @@ class KYCService:
         self,
         *,
         user_id: UUID,
+        kyc_id: UUID,
         action: str,
         reviewed_by: str | None = None,
         review_notes: str | None = None,
@@ -226,9 +227,12 @@ class KYCService:
 
         await get_user_or_raise(user_repository=self.user_repository, user_id=user_id, error_code="USER_NOT_FOUND")
 
-        kyc = await self._get_latest_submission(user_id=user_id)
+        kyc = await self.kyc_repository.get_user_submission_for_update(user_id=user_id, kyc_id=kyc_id)
         if not kyc:
-            raise ValidationException("KYC record not found for user.")
+            raise ValidationException(
+                detail="KYC record not found for user.",
+                error_code="KYC_NOT_FOUND",
+            )
 
         normalized_action = self._normalize_review_action(action)
         normalized_review_notes = self._sanitize_optional_text(review_notes)
@@ -252,8 +256,7 @@ class KYCService:
             "is_active": normalized_action == "approved",
         }
 
-        async with self._session_scope():
-            return await self.kyc_repository.update_kyc(kyc, **update_fields)
+        return await self.kyc_repository.update_kyc(kyc, **update_fields)
 
     def _validate_required_fields(self, **values: Any) -> None:
         for field_name, value in values.items():

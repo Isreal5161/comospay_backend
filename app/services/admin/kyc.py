@@ -10,10 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit_log import AuditLog
 from app.models.kyc import KYC
+from app.repositories.admin_repository import AdminRepository
 from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.kyc_repository import KYCRepository
+from app.services.admin.authorization import require_active_admin
 from app.services.user.kyc import KYCService as UserKYCService
 from app.services.notification_service import NotificationService
-from app.utils.exceptions import ValidationException
+from app.utils.exceptions import AuthorizationException, ValidationException
 
 
 class KYCService:
@@ -23,22 +26,27 @@ class KYCService:
         self,
         logger: logging.Logger | None = None,
         kyc_domain_service: UserKYCService | None = None,
+        kyc_repository: KYCRepository | None = None,
+        admin_repository: AdminRepository | None = None,
         notification_service: NotificationService | None = None,
         audit_repository: AuditLogRepository | None = None,
         session: AsyncSession | None = None,
     ) -> None:
         self.logger = logger or logging.getLogger(__name__)
         self.kyc_domain_service = kyc_domain_service
+        self.kyc_repository = kyc_repository
+        self.admin_repository = admin_repository
         self.notification_service = notification_service
         self.audit_repository = audit_repository
         self.session = session
 
-    async def review_kyc(self, *, user_id: UUID, action: str, **payload: Any) -> dict[str, Any]:
+    async def review_kyc(self, *, user_id: UUID, kyc_id: UUID, action: str, **payload: Any) -> dict[str, Any]:
+        review_actor = await self._require_authorized_admin(payload)
         review_notes = self._to_optional_str(payload.get("review_notes"))
         rejection_reason = self._resolve_rejection_reason(payload=payload)
-        review_actor = self._resolve_review_actor(payload=payload)
         updated = await self._review_with_domain_service(
             user_id=user_id,
+            kyc_id=kyc_id,
             action=action,
             review_actor=review_actor,
             review_notes=review_notes,
@@ -46,27 +54,57 @@ class KYCService:
         )
         normalized_action = updated.verification_status
 
-        async with self._session_scope():
-            await self._create_audit_log(
-                actor_id=review_actor,
-                decision=normalized_action,
-                user_id=user_id,
-                record=updated,
-                review_notes=review_notes,
-                rejection_reason=rejection_reason,
-            )
-            await self._notify_user(
-                user_id=user_id,
-                decision=normalized_action,
-                kyc_id=updated.id,
-                review_notes=review_notes,
-                rejection_reason=rejection_reason,
-            )
+        try:
+            async with self._session_scope():
+                await self._create_audit_log(
+                    actor_id=review_actor,
+                    decision=normalized_action,
+                    user_id=user_id,
+                    record=updated,
+                    review_notes=review_notes,
+                    rejection_reason=rejection_reason,
+                )
+                await self._notify_user(
+                    user_id=user_id,
+                    decision=normalized_action,
+                    kyc_id=updated.id,
+                    review_notes=review_notes,
+                    rejection_reason=rejection_reason,
+                )
+            if self.session is not None:
+                await self.session.commit()
+        except Exception:
+            if self.session is not None:
+                await self.session.rollback()
+            raise
 
         return {
             "success": True,
             "data": self._serialize_kyc(updated),
             "meta": {"source": "admin.kyc", "action": normalized_action},
+        }
+
+    async def get_user_kyc(self, *, user_id: UUID, page: int = 1, page_size: int = 20, **payload: Any) -> dict[str, Any]:
+        await self._require_authorized_admin(payload)
+        if self.kyc_repository is None or self.kyc_domain_service is None:
+            raise ValidationException(detail="KYC administration dependencies are unavailable.", error_code="ADMIN_KYC_UNAVAILABLE")
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise ValidationException(detail="Invalid KYC pagination.", error_code="INVALID_PAGINATION")
+
+        await self.kyc_domain_service.get_kyc_status(user_id=user_id)
+        records, total = await self.kyc_repository.get_user_kyc(
+            user_id=user_id,
+            page=page,
+            page_size=page_size,
+            order_by="created_at",
+            descending=True,
+        )
+        return {
+            "items": [self._serialize_kyc_profile(record) for record in records],
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size,
         }
 
     def _require_dependencies(self) -> None:
@@ -77,6 +115,7 @@ class KYCService:
         self,
         *,
         user_id: UUID,
+        kyc_id: UUID,
         action: str,
         review_actor: str,
         review_notes: str | None,
@@ -86,6 +125,7 @@ class KYCService:
         assert self.kyc_domain_service is not None
         return await self.kyc_domain_service.review_kyc(
             user_id=user_id,
+            kyc_id=kyc_id,
             action=action,
             reviewed_by=review_actor,
             review_notes=review_notes,
@@ -100,11 +140,16 @@ class KYCService:
             raw = payload.get("review_notes")
         return self._to_optional_str(raw)
 
-    def _resolve_review_actor(self, *, payload: dict[str, Any]) -> str:
+    async def _require_authorized_admin(self, payload: dict[str, Any]) -> str:
         raw_admin_id = payload.get("admin_id")
         if raw_admin_id is None:
-            return "system"
-        return str(raw_admin_id)
+            raise AuthorizationException(detail="Admin identity is required.", error_code="ADMIN_ID_REQUIRED")
+        try:
+            admin_id = UUID(str(raw_admin_id))
+        except (ValueError, TypeError) as exc:
+            raise AuthorizationException(detail="Admin identity is invalid.", error_code="ADMIN_ID_INVALID") from exc
+        await require_active_admin(self.admin_repository, admin_id)
+        return str(admin_id)
 
     async def _create_audit_log(
         self,
@@ -186,17 +231,35 @@ class KYCService:
             "verification_status": record.verification_status,
             "verification_level": record.verification_level,
             "document_type": record.document_type,
-            "document_reference": record.document_reference,
             "document_verification_status": record.document_verification_status,
+            "submitted_at": record.submitted_at.isoformat() if record.submitted_at else None,
             "reviewed_by": record.reviewed_by,
             "reviewed_at": record.reviewed_at.isoformat() if record.reviewed_at else None,
             "approved_at": record.approved_at.isoformat() if record.approved_at else None,
             "rejected_at": record.rejected_at.isoformat() if record.rejected_at else None,
             "rejection_reason": record.rejection_reason,
-            "compliance_notes": record.compliance_notes,
             "is_active": record.is_active,
             "is_verified": record.is_verified,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
             "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+        }
+
+    def _serialize_kyc_profile(self, record: KYC) -> dict[str, Any]:
+        return {
+            "id": str(record.id),
+            "verification_status": record.verification_status,
+            "verification_level": record.verification_level,
+            "document_type": record.document_type,
+            "document_verification_status": record.document_verification_status,
+            "submitted_at": record.submitted_at.isoformat() if record.submitted_at else None,
+            "reviewed_by": record.reviewed_by,
+            "reviewed_at": record.reviewed_at.isoformat() if record.reviewed_at else None,
+            "approved_at": record.approved_at.isoformat() if record.approved_at else None,
+            "rejected_at": record.rejected_at.isoformat() if record.rejected_at else None,
+            "rejection_reason": record.rejection_reason,
+            "is_active": record.is_active,
+            "is_verified": record.is_verified,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
         }
 
     def _to_optional_str(self, value: Any) -> str | None:
