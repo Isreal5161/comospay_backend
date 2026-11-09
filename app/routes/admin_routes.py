@@ -601,6 +601,25 @@ async def get_user_ledger(
     )
 
 
+@router.get(
+    "/users/{user_id}/wallets/{wallet_id}/ledger/reference",
+    status_code=status.HTTP_200_OK,
+)
+async def get_user_ledger_by_reference(
+    user_id: UUID,
+    wallet_id: UUID,
+    request: Request,
+    transaction_reference: str = Query(..., min_length=1, max_length=100),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_user_ledger_by_reference(
+        user_id=user_id,
+        wallet_id=wallet_id,
+        transaction_reference=transaction_reference,
+        request=request,
+    )
+
+
 @router.get("/wallets/{wallet_id}/analytics", status_code=status.HTTP_200_OK)
 async def wallet_analytics(
     wallet_id: str,

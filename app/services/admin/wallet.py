@@ -280,11 +280,17 @@ class WalletAdministrationService:
             order_by=order_by,
             descending=descending,
         )
+        total_wallets, currencies = await self.wallet_repository.get_wallet_directory_metadata()
         items = [self._serialize_wallet(item) for item in wallets]
 
         return {
             "success": True,
-            "data": {"items": items, "total": total},
+            "data": {
+                "items": items,
+                "total": total,
+                "total_wallets": total_wallets,
+                "currencies": currencies,
+            },
             "meta": {"source": "admin.wallet", "page": page, "page_size": page_size},
         }
 
@@ -400,6 +406,47 @@ class WalletAdministrationService:
                 "total_pages": (total + page_size - 1) // page_size,
             },
             "meta": {"source": "admin.wallet.ledger"},
+        }
+
+    async def get_user_ledger_by_reference(
+        self,
+        *,
+        user_id: UUID,
+        wallet_id: UUID,
+        transaction_reference: str,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        self._require_wallet_repository()
+        await self._require_authorized_admin(payload)
+        if self.ledger_repository is None:
+            raise ValidationException(
+                detail="Wallet ledger retrieval is unavailable.",
+                error_code="ADMIN_WALLET_LEDGER_UNAVAILABLE",
+            )
+
+        reference = transaction_reference.strip()
+        if not reference or len(reference) > 100:
+            raise ValidationException(
+                detail="A valid transaction reference is required.",
+                error_code="INVALID_TRANSACTION_REFERENCE",
+            )
+
+        wallet = await self.wallet_repository.get_by_id(wallet_id)
+        if wallet is None or wallet.user_id != user_id:
+            raise ValidationException(detail="Wallet not found for user.", error_code="WALLET_NOT_FOUND")
+
+        total, entries = await self.ledger_repository.find_by_wallet_user_reference(
+            wallet_id=wallet_id,
+            user_id=user_id,
+            transaction_reference=reference,
+        )
+        return {
+            "success": True,
+            "data": {
+                "total": total,
+                "items": [self._serialize_ledger_entry(entry) for entry in entries],
+            },
+            "meta": {"source": "admin.wallet.ledger.reference"},
         }
 
     async def wallet_analytics(self, *, wallet_id: UUID, **payload: Any) -> dict[str, Any]:
@@ -521,9 +568,18 @@ class WalletAdministrationService:
             raise ValidationException(detail="Wallet administration dependencies are unavailable.", error_code="ADMIN_WALLET_UNAVAILABLE")
 
     def _serialize_wallet(self, wallet: Wallet) -> dict[str, Any]:
+        user = wallet.user
+        user_name = " ".join(
+            part.strip()
+            for part in (user.first_name, user.last_name)
+            if part and part.strip()
+        ) if user is not None else ""
         return {
             "id": str(wallet.id),
             "user_id": str(wallet.user_id),
+            "user_name": user_name or (user.username if user is not None else None),
+            "user_email": user.email if user is not None else None,
+            "user_phone": user.phone if user is not None else None,
             "wallet_reference": wallet.wallet_reference,
             "wallet_type": wallet.wallet_type,
             "currency": wallet.currency,
@@ -539,11 +595,17 @@ class WalletAdministrationService:
         }
 
     def _serialize_ledger_entry(self, entry: Ledger) -> dict[str, Any]:
+        metadata = entry.metadata_payload if isinstance(entry.metadata_payload, dict) else {}
+        adjustment_reason = metadata.get("reason") if entry.transaction_type.upper() in {"ADMIN_CREDIT", "ADMIN_DEBIT"} else None
         return {
             "id": str(entry.ledger_id),
             "transaction_reference": entry.transaction_reference,
+            "wallet_id": str(entry.wallet_id),
+            "user_id": str(entry.user_id),
             "transaction_type": entry.transaction_type,
             "entry_type": entry.entry_type,
+            "created_by": entry.created_by,
+            "adjustment_reason": adjustment_reason if isinstance(adjustment_reason, str) else None,
             "description": entry.description,
             "status": entry.status,
             "currency": entry.currency,

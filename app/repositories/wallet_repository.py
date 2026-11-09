@@ -4,9 +4,10 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import String, cast, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.user import User
 from app.models.wallet import Wallet
 
 
@@ -133,6 +134,14 @@ class WalletRepository:
         )
         return list(result.scalars().all()), total
 
+    async def get_wallet_directory_metadata(self) -> tuple[int, list[str]]:
+        """Return global wallet count and distinct currencies for directory controls."""
+        count_result = await self.session.execute(select(func.count(Wallet.id)))
+        currencies_result = await self.session.execute(
+            select(Wallet.currency).distinct().order_by(Wallet.currency)
+        )
+        return int(count_result.scalar_one() or 0), list(currencies_result.scalars().all())
+
     async def update_wallet(self, wallet: Wallet, **fields: Any) -> Wallet:
         """Update editable wallet fields in the database."""
         for field, value in fields.items():
@@ -201,10 +210,40 @@ class WalletRepository:
             count_query = count_query.where(Wallet.currency == normalized_currency)
         if query_text:
             pattern = f"%{query_text}%"
+            wallet_id_filter = cast(Wallet.id, String).ilike(pattern)
+            compact_query = query_text.replace("-", "").strip()
+            if compact_query:
+                wallet_id_filter = or_(
+                    wallet_id_filter,
+                    func.replace(cast(Wallet.id, String), "-", "").ilike(f"%{compact_query}%"),
+                )
+            user_id_filter = cast(User.id, String).ilike(pattern)
+            if compact_query:
+                user_id_filter = or_(
+                    user_id_filter,
+                    func.replace(cast(User.id, String), "-", "").ilike(f"%{compact_query}%"),
+                )
+            user_search_filter = Wallet.user.has(
+                or_(
+                    user_id_filter,
+                    User.first_name.ilike(pattern),
+                    User.last_name.ilike(pattern),
+                    User.username.ilike(pattern),
+                    User.email.ilike(pattern),
+                    User.phone.ilike(pattern),
+                    (
+                        func.coalesce(User.first_name, "")
+                        + " "
+                        + func.coalesce(User.last_name, "")
+                    ).ilike(pattern),
+                )
+            )
             search_filter = or_(
                 Wallet.wallet_reference.ilike(pattern),
+                wallet_id_filter,
                 Wallet.status.ilike(pattern),
                 Wallet.wallet_type.ilike(pattern),
+                user_search_filter,
             )
             query = query.where(search_filter)
             count_query = count_query.where(search_filter)

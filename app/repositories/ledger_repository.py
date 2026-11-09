@@ -86,6 +86,35 @@ class LedgerRepository:
             logger.exception("Failed to fetch ledger by wallet reference")
             raise DatabaseException(detail="Unable to fetch ledger record.") from exc
 
+    async def find_by_wallet_user_reference(
+        self,
+        *,
+        wallet_id: UUID,
+        user_id: UUID,
+        transaction_reference: str,
+    ) -> tuple[int, list[Ledger]]:
+        """Count all exact scoped matches and return enough records to identify duplicates."""
+        filters = (
+            Ledger.wallet_id == wallet_id,
+            Ledger.user_id == user_id,
+            Ledger.transaction_reference == transaction_reference,
+        )
+        try:
+            count_result = await self.session.execute(
+                select(func.count(Ledger.ledger_id)).where(*filters)
+            )
+            total = int(count_result.scalar_one() or 0)
+            result = await self.session.execute(
+                select(Ledger)
+                .where(*filters)
+                .order_by(Ledger.created_at.desc(), Ledger.ledger_id)
+                .limit(2)
+            )
+            return total, list(result.scalars().all())
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to find ledger entries by wallet, user, and reference")
+            raise DatabaseException(detail="Unable to fetch ledger records.") from exc
+
     async def get_by_transaction_id(self, related_transaction_id: UUID) -> list[Ledger]:
         """Retrieve ledger entries associated with a transaction."""
         try:

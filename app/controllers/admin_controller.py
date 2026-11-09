@@ -168,6 +168,10 @@ class AdminController:
         self.router.get("/wallets/{wallet_id}", status_code=status.HTTP_200_OK)(self.get_wallet_details)
         self.router.get("/wallets/user/{user_id}", status_code=status.HTTP_200_OK)(self.get_user_wallet)
         self.router.get("/wallets/{wallet_id}/history", status_code=status.HTTP_200_OK)(self.wallet_history)
+        self.router.get(
+            "/users/{user_id}/wallets/{wallet_id}/ledger/reference",
+            status_code=status.HTTP_200_OK,
+        )(self.get_user_ledger_by_reference)
         self.router.get("/wallets/{wallet_id}/analytics", status_code=status.HTTP_200_OK)(self.wallet_analytics)
         self.router.post("/wallets/{wallet_id}/freeze", status_code=status.HTTP_200_OK)(self.freeze_wallet)
         self.router.post("/wallets/{wallet_id}/unfreeze", status_code=status.HTTP_200_OK)(self.unfreeze_wallet)
@@ -530,6 +534,28 @@ class AdminController:
                 "entry_type": entry_type,
             },
             success_message="Wallet ledger retrieved successfully.",
+        )
+
+    async def get_user_ledger_by_reference(
+        self,
+        user_id: UUID,
+        wallet_id: UUID,
+        transaction_reference: str,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="get_user_ledger_by_reference",
+            handler=self._resolve_handler("get_user_ledger_by_reference"),
+            payload={
+                "admin_id": target_admin_id,
+                "user_id": user_id,
+                "wallet_id": wallet_id,
+                "transaction_reference": transaction_reference,
+            },
+            success_message="Wallet ledger reference retrieved successfully.",
         )
 
     async def wallet_analytics(
