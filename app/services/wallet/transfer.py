@@ -14,6 +14,7 @@ from app.models.transaction import Transaction
 from app.models.wallet import Wallet
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.ledger_service import LedgerService
 from app.utils.exceptions import DatabaseException, ProviderException, ValidationException, WalletException
 
 
@@ -29,6 +30,7 @@ class WalletTransferService:
         session: AsyncSession | None = None,
         logger: logging.Logger | None = None,
         audit_service: Any | None = None,
+        ledger_service: LedgerService | None = None,
     ) -> None:
         self.wallet_repository = wallet_repository
         self.transaction_repository = transaction_repository
@@ -36,6 +38,7 @@ class WalletTransferService:
         self.session = session
         self.logger = logger or logging.getLogger(__name__)
         self.audit_service = audit_service
+        self.ledger_service = ledger_service
 
     async def transfer_between_users(
         self,
@@ -107,6 +110,7 @@ class WalletTransferService:
                 if recipient_wallet_after_debit is None:
                     raise ValidationException("Recipient wallet not found.")
 
+                recipient_opening_balance = recipient_wallet_after_debit.available_balance
                 recipient_wallet_after_debit.available_balance = recipient_wallet_after_debit.available_balance + amount_value
                 recipient_wallet_after_debit.ledger_balance = recipient_wallet_after_debit.ledger_balance + amount_value
                 await self.wallet_repository.update_balance_fields(
@@ -114,6 +118,21 @@ class WalletTransferService:
                     available_balance=recipient_wallet_after_debit.available_balance,
                     ledger_balance=recipient_wallet_after_debit.ledger_balance,
                 )
+                if self.ledger_service is not None:
+                    await self.ledger_service.create_credit_entry(
+                        wallet_id=recipient_wallet_after_debit.id,
+                        user_id=recipient_wallet_after_debit.user_id,
+                        transaction_reference=transaction.reference,
+                        transaction_type="WALLET_TRANSFER_CREDIT",
+                        opening_balance=recipient_opening_balance,
+                        amount=amount_value,
+                        currency=recipient_wallet_after_debit.currency,
+                        description=description or "Internal wallet transfer credit",
+                        related_transaction_id=transaction.id,
+                        created_by="wallet_transfer",
+                        status="POSTED",
+                        metadata={"source": "wallet_transfer", "direction": "credit"},
+                    )
 
                 transaction.status = "completed"
                 transaction.metadata_payload = self._merge_metadata(transaction.metadata_payload, {"recipient_wallet_id": str(recipient_wallet_after_debit.id)})
@@ -302,6 +321,7 @@ class WalletTransferService:
         if wallet.is_frozen or wallet.is_suspended or not wallet.is_active:
             raise WalletException("Wallet is not active for transfer.")
 
+        opening_balance = wallet.available_balance
         updated_available = wallet.available_balance - amount_value
         updated_ledger = wallet.ledger_balance - amount_value
         wallet.available_balance = updated_available
@@ -311,6 +331,21 @@ class WalletTransferService:
             available_balance=updated_available,
             ledger_balance=updated_ledger,
         )
+        if self.ledger_service is not None:
+            await self.ledger_service.create_debit_entry(
+                wallet_id=wallet.id,
+                user_id=wallet.user_id,
+                transaction_reference=reference or (transaction.reference if transaction is not None else "WALLET_TRANSFER"),
+                transaction_type="WALLET_TRANSFER_DEBIT",
+                opening_balance=opening_balance,
+                amount=amount_value,
+                currency=wallet.currency,
+                description=(transaction.description if transaction is not None else None) or "Wallet transfer debit",
+                related_transaction_id=transaction.id if transaction is not None else None,
+                created_by="wallet_transfer",
+                status="POSTED",
+                metadata={"source": "wallet_transfer", "direction": "debit"},
+            )
 
         if transaction is not None:
             transaction.status = "completed"
@@ -342,6 +377,7 @@ class WalletTransferService:
 
         try:
             async with self._session_scope():
+                opening_balance = wallet.available_balance
                 wallet.available_balance = wallet.available_balance + transaction.amount
                 wallet.ledger_balance = wallet.ledger_balance + transaction.amount
                 await self.wallet_repository.update_balance_fields(
@@ -349,6 +385,21 @@ class WalletTransferService:
                     available_balance=wallet.available_balance,
                     ledger_balance=wallet.ledger_balance,
                 )
+                if self.ledger_service is not None:
+                    await self.ledger_service.create_credit_entry(
+                        wallet_id=wallet.id,
+                        user_id=wallet.user_id,
+                        transaction_reference=transaction.reference,
+                        transaction_type="WALLET_TRANSFER_REVERSAL",
+                        opening_balance=opening_balance,
+                        amount=transaction.amount,
+                        currency=wallet.currency,
+                        description=reason or "Transfer reversal",
+                        related_transaction_id=transaction.id,
+                        created_by="wallet_transfer",
+                        status="POSTED",
+                        metadata={"source": "wallet_transfer_reversal", "reason": reason},
+                    )
                 transaction.status = "reversed"
                 transaction.metadata_payload = self._merge_metadata(transaction.metadata_payload, {"reversal_reason": reason})
                 await self.transaction_repository.update_transaction(transaction, status=transaction.status, metadata_payload=transaction.metadata_payload)

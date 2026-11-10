@@ -9,9 +9,11 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit_log import AuditLog
+from app.models.ledger import Ledger
 from app.models.transaction import Transaction
 from app.repositories.admin_repository import AdminRepository
 from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.ledger_repository import LedgerRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.services.airtime_service import AirtimeService
 from app.services.admin.authorization import require_active_admin
@@ -46,6 +48,7 @@ class TransactionAdministrationService:
         self,
         logger: logging.Logger | None = None,
         transaction_repository: TransactionRepository | None = None,
+        ledger_repository: LedgerRepository | None = None,
         admin_repository: AdminRepository | None = None,
         audit_repository: AuditLogRepository | None = None,
         notification_service: NotificationService | None = None,
@@ -63,6 +66,7 @@ class TransactionAdministrationService:
     ) -> None:
         self.logger = logger or logging.getLogger(__name__)
         self.transaction_repository = transaction_repository
+        self.ledger_repository = ledger_repository
         self.admin_repository = admin_repository
         self.audit_repository = audit_repository
         self.notification_service = notification_service
@@ -97,6 +101,7 @@ class TransactionAdministrationService:
         start_date = payload.get("start_date")
         end_date = payload.get("end_date")
         search = self._optional_text(payload.get("search"))
+        provider = self._optional_text(payload.get("provider"))
         order_by = str(payload.get("order_by") or "created_at")
         descending = bool(payload.get("descending", True))
         if order_by not in self._LIST_SORT_FIELDS:
@@ -127,10 +132,27 @@ class TransactionAdministrationService:
             start_date=start_date,
             end_date=end_date,
             search=search,
+            provider=provider,
             order_by=order_by,
             descending=descending,
+            include_user=True,
         )
-        serialized_items = [self._serialize_transaction(item) for item in items]
+        serialized_items = [
+            self._serialize_transaction(item, user=user)
+            for item, user in items
+        ]
+        summary = await self.transaction_repository.get_admin_transaction_summary(
+            status=status,
+            category=category,
+            transaction_type=transaction_type,
+            reference=reference,
+            user_id=user_id,
+            currency=currency,
+            start_date=start_date,
+            end_date=end_date,
+            search=search,
+            provider=provider,
+        )
 
         return {
             "success": True,
@@ -140,6 +162,7 @@ class TransactionAdministrationService:
                 "page_size": page_size,
                 "total": total,
                 "total_pages": (total + page_size - 1) // page_size,
+                "summary": summary,
             },
             "meta": {"source": "admin.transactions", "page": page, "page_size": page_size},
         }
@@ -162,12 +185,27 @@ class TransactionAdministrationService:
         self._require_transaction_repository()
         await self._require_authorized_admin(payload)
 
-        transaction = await self.transaction_repository.get_by_id(transaction_id)
-        if transaction is None:
+        record = await self.transaction_repository.get_admin_transaction_details(transaction_id)
+        if record is None:
             raise ValidationException(detail="Transaction not found.", error_code="TRANSACTION_NOT_FOUND")
+        transaction, user = record
+        ledger_entries = (
+            await self.ledger_repository.get_by_transaction_id(transaction.id)
+            if self.ledger_repository is not None
+            else []
+        )
+        ledger_entries = [
+            entry
+            for entry in ledger_entries
+            if entry.user_id == transaction.user_id
+            and (transaction.wallet_id is None or entry.wallet_id == transaction.wallet_id)
+        ]
         return {
             "success": True,
-            "data": self._serialize_transaction(transaction, include_metadata=True),
+            "data": {
+                **self._serialize_transaction(transaction, include_metadata=True, user=user),
+                "ledger_entries": [self._serialize_ledger_entry(entry) for entry in ledger_entries],
+            },
             "meta": {"source": "admin.transactions"},
         }
 
@@ -571,7 +609,13 @@ class TransactionAdministrationService:
         if self.transaction_repository is None:
             raise ValidationException(detail="Transaction administration dependencies are unavailable.", error_code="ADMIN_TRANSACTION_UNAVAILABLE")
 
-    def _serialize_transaction(self, transaction: Transaction, *, include_metadata: bool = False) -> dict[str, Any]:
+    def _serialize_transaction(
+        self,
+        transaction: Transaction,
+        *,
+        include_metadata: bool = False,
+        user: Any = None,
+    ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "id": str(transaction.id),
             "reference": transaction.reference,
@@ -589,12 +633,75 @@ class TransactionAdministrationService:
             "provider_transaction_id": transaction.provider_transaction_id,
             "external_reference": transaction.external_reference,
             "description": transaction.description,
+            "card_amount": str(transaction.card_amount) if transaction.card_amount is not None else None,
+            "card_currency": transaction.card_currency,
+            "payout_amount": str(transaction.payout_amount) if transaction.payout_amount is not None else None,
+            "payout_currency": transaction.payout_currency,
+            "credited_amount": str(transaction.credited_amount) if transaction.credited_amount is not None else None,
+            "credited_currency": transaction.credited_currency,
+            "user": self._serialize_transaction_user(user) if user is not None else None,
             "created_at": transaction.created_at.isoformat() if transaction.created_at else None,
             "updated_at": transaction.updated_at.isoformat() if transaction.updated_at else None,
         }
         if include_metadata:
-            data["metadata_payload"] = self._parse_json(transaction.metadata_payload)
+            data["metadata"] = self._safe_transaction_metadata(transaction.metadata_payload)
         return data
+
+    @staticmethod
+    def _serialize_transaction_user(user: Any) -> dict[str, str | None]:
+        name = " ".join(
+            part.strip()
+            for part in (getattr(user, "first_name", None), getattr(user, "last_name", None))
+            if isinstance(part, str) and part.strip()
+        )
+        return {
+            "id": str(user.id),
+            "name": name or None,
+            "email": user.email,
+        }
+
+    def _safe_transaction_metadata(self, raw_value: str | None) -> dict[str, Any]:
+        safe_keys = {
+            "channel",
+            "payment_method",
+            "payment_type",
+            "service",
+            "network",
+            "plan",
+            "plan_name",
+            "product",
+            "product_name",
+            "meter_type",
+            "subscription_type",
+            "customer_type",
+        }
+        parsed = self._parse_json(raw_value)
+        return {
+            key: value
+            for key, value in parsed.items()
+            if key.lower() in safe_keys
+            and isinstance(value, (str, int, float, bool))
+            and (not isinstance(value, str) or len(value) <= 200)
+        }
+
+    @staticmethod
+    def _serialize_ledger_entry(entry: Ledger) -> dict[str, Any]:
+        return {
+            "id": str(entry.ledger_id),
+            "source": "ledger",
+            "transaction_reference": entry.transaction_reference,
+            "transaction_type": entry.transaction_type,
+            "entry_type": entry.entry_type,
+            "status": entry.status,
+            "currency": entry.currency,
+            "debit_amount": str(entry.debit_amount),
+            "credit_amount": str(entry.credit_amount),
+            "opening_balance": str(entry.opening_balance),
+            "closing_balance": str(entry.closing_balance),
+            "created_by": entry.created_by,
+            "description": entry.description,
+            "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        }
 
     def _parse_json(self, raw_value: str | None) -> dict[str, Any]:
         if not raw_value:

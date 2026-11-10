@@ -167,6 +167,9 @@ class AdminService:
             **payload,
         )
 
+    async def list_admin_adjustments(self, **payload: Any) -> dict[str, Any]:
+        return await self.wallet_service.list_admin_adjustments(**payload)
+
     async def wallet_analytics(self, *, wallet_id, **payload: Any) -> dict[str, Any]:
         return await self.wallet_service.wallet_analytics(wallet_id=wallet_id, **payload)
 

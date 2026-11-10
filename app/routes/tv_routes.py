@@ -22,6 +22,7 @@ from app.controllers.tv_controller import (
     TVValidationRequest,
 )
 from app.repositories.provider_repository import ProviderRepository
+from app.repositories.ledger_repository import LedgerRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
@@ -36,6 +37,7 @@ from app.services.tv.pricing import TVPricingService
 from app.services.tv.purchase import TVPurchaseService
 from app.services.tv.reconciliation import TVReconciliationService
 from app.services.tv.validation import TVValidationService
+from app.services.ledger_service import LedgerService
 from app.services.tv_service import TVService
 from app.services.wallet import (
     WalletFundingService,
@@ -69,6 +71,12 @@ async def get_tv_service(session: AsyncSession = Depends(get_db)) -> TVService:
     user_repository = UserRepository(session=session)
     wallet_repository = WalletRepository(session=session)
     transaction_repository = TransactionRepository(session=session)
+    ledger_service = LedgerService(
+        ledger_repository=LedgerRepository(session=session),
+        wallet_repository=wallet_repository,
+        user_repository=user_repository,
+        transaction_repository=transaction_repository,
+    )
     settings_repository = SystemSettingsRepository(session=session)
 
     wallet_service = _build_wallet_service(
@@ -92,11 +100,13 @@ async def get_tv_service(session: AsyncSession = Depends(get_db)) -> TVService:
         transaction_repository=transaction_repository,
         user_repository=user_repository,
         wallet_repository=wallet_repository,
+        ledger_service=ledger_service,
     )
     reconciliation_service = TVReconciliationService(
         provider_service=provider_service,
         transaction_repository=transaction_repository,
         settings_repository=settings_repository,
+        purchase_service=purchase_service,
     )
 
     return TVService(

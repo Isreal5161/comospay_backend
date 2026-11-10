@@ -24,9 +24,11 @@ from app.controllers.wallet_controller import (
 )
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.bank_account_repository import BankAccountRepository
+from app.repositories.ledger_repository import LedgerRepository
 from app.repositories.provider_repository import ProviderRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.ledger_service import LedgerService
 from app.services.user.bank_account import BankAccountService
 from app.services.wallet import (
     WalletFundingService,
@@ -108,16 +110,25 @@ async def get_wallet_service(session: AsyncSession = Depends(get_db)) -> WalletS
         virtual_account_service=__import_virtual_account_service(session, user_repository, wallet_repository),
         session=session,
     )
+    ledger_service = LedgerService(
+        ledger_repository=LedgerRepository(session=session),
+        wallet_repository=wallet_repository,
+        user_repository=user_repository,
+        transaction_repository=transaction_repository,
+        logger=None,
+    )
     funding_service = WalletFundingService(
         wallet_repository=wallet_repository,
         transaction_repository=transaction_repository,
         user_repository=user_repository,
         session=session,
+        ledger_service=ledger_service,
     )
     transfer_service = WalletTransferService(
         wallet_repository=wallet_repository,
         transaction_repository=transaction_repository,
         session=session,
+        ledger_service=ledger_service,
     )
     withdrawal_service = WalletWithdrawalService(
         wallet_repository=wallet_repository,
@@ -126,6 +137,7 @@ async def get_wallet_service(session: AsyncSession = Depends(get_db)) -> WalletS
         provider_service=provider_service,
         provider_adapter_factory=withdrawal_provider_factory,
         session=session,
+        ledger_service=ledger_service,
     )
     pin_service = WalletPinService(
         user_repository=user_repository,

@@ -49,6 +49,19 @@ class WithdrawalBankAccountService:
         return {"account_number": "0123456789", "bank_code": "044"}
 
 
+class DummyLedgerService:
+    def __init__(self):
+        self.entries = []
+
+    async def create_debit_entry(self, **kwargs):
+        self.entries.append(("debit", kwargs))
+        return SimpleNamespace(**kwargs)
+
+    async def create_credit_entry(self, **kwargs):
+        self.entries.append(("credit", kwargs))
+        return SimpleNamespace(**kwargs)
+
+
 def make_withdrawal_service():
     user_id = uuid4()
     wallet = SimpleNamespace(
@@ -141,3 +154,40 @@ def test_withdrawal_references_are_unique() -> None:
     )
 
     assert first["reference"] != second["reference"]
+
+
+def test_create_withdrawal_creates_ledger_debit_entry() -> None:
+    user_id = uuid4()
+    wallet = SimpleNamespace(
+        id=uuid4(),
+        user_id=user_id,
+        currency="NGN",
+        available_balance=Decimal("125000.00"),
+        ledger_balance=Decimal("125000.00"),
+        locked_balance=Decimal("0.00"),
+        is_frozen=False,
+        is_suspended=False,
+        is_active=True,
+    )
+    service = WalletWithdrawalService(
+        wallet_repository=WithdrawalWalletRepository(wallet),
+        transaction_repository=WithdrawalTransactionRepository(),
+        bank_account_service=WithdrawalBankAccountService(user_id),
+        provider_service=SimpleNamespace(
+            withdraw_to_bank=lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider called")),
+        ),
+        ledger_service=DummyLedgerService(),
+    )
+
+    asyncio.run(
+        service.create_withdrawal(
+            user_id=user_id,
+            amount=Decimal("10000.00"),
+            currency="NGN",
+            bank_account_id=service.bank_account_service.bank_account_id,
+        )
+    )
+
+    assert len(service.ledger_service.entries) == 1
+    assert service.ledger_service.entries[0][0] == "debit"
+    assert service.ledger_service.entries[0][1]["transaction_type"] == "WALLET_WITHDRAWAL"

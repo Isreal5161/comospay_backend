@@ -14,6 +14,7 @@ from app.models.transaction import Transaction
 from app.models.wallet import Wallet
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.ledger_service import LedgerService
 from app.utils.exceptions import DatabaseException, ProviderException, ValidationException, WalletException
 
 
@@ -32,6 +33,7 @@ class WalletFundingService:
         payment_service: Any | None = None,
         user_repository: Any | None = None,
         session: AsyncSession | None = None,
+        ledger_service: LedgerService | None = None,
         logger: logging.Logger | None = None,
         audit_service: Any | None = None,
     ) -> None:
@@ -41,6 +43,7 @@ class WalletFundingService:
         self.payment_service = payment_service
         self.user_repository = user_repository
         self.session = session
+        self.ledger_service = ledger_service
         self.logger = logger or logging.getLogger(__name__)
         self.audit_service = audit_service
 
@@ -193,6 +196,7 @@ class WalletFundingService:
                 wallet = await self._get_wallet_and_validate_ownership(wallet_id=wallet_id, user_id=user_id)
                 self._validate_wallet_state(wallet)
 
+                opening_balance = wallet.available_balance
                 updated_available = wallet.available_balance + transaction.amount
                 updated_ledger = wallet.ledger_balance + transaction.amount
                 wallet.available_balance = updated_available
@@ -202,6 +206,21 @@ class WalletFundingService:
                     available_balance=updated_available,
                     ledger_balance=updated_ledger,
                 )
+                if self.ledger_service is not None:
+                    await self.ledger_service.create_credit_entry(
+                        wallet_id=wallet.id,
+                        user_id=wallet.user_id,
+                        transaction_reference=transaction.reference,
+                        transaction_type="WALLET_FUNDING",
+                        opening_balance=opening_balance,
+                        amount=transaction.amount,
+                        currency=wallet.currency,
+                        description=transaction.description or "Wallet funding credit",
+                        related_transaction_id=transaction.id,
+                        created_by="wallet_funding",
+                        status="POSTED",
+                        metadata={"source": "wallet_funding_credit"},
+                    )
                 transaction.status = "completed"
                 transaction.metadata_payload = self._merge_metadata(
                     transaction.metadata_payload,
@@ -240,6 +259,7 @@ class WalletFundingService:
 
         try:
             async with self._session_scope():
+                opening_balance = wallet.available_balance
                 updated_available = wallet.available_balance - transaction.amount
                 updated_ledger = wallet.ledger_balance - transaction.amount
                 wallet.available_balance = updated_available
@@ -249,6 +269,21 @@ class WalletFundingService:
                     available_balance=updated_available,
                     ledger_balance=updated_ledger,
                 )
+                if self.ledger_service is not None:
+                    await self.ledger_service.create_debit_entry(
+                        wallet_id=wallet.id,
+                        user_id=wallet.user_id,
+                        transaction_reference=transaction.reference,
+                        transaction_type="WALLET_FUNDING_REVERSAL",
+                        opening_balance=opening_balance,
+                        amount=transaction.amount,
+                        currency=wallet.currency,
+                        description=reason or "Wallet funding credit reversal",
+                        related_transaction_id=transaction.id,
+                        created_by="wallet_funding",
+                        status="POSTED",
+                        metadata={"source": "wallet_funding_reversal", "reason": reason},
+                    )
                 transaction.status = "reversed"
                 transaction.metadata_payload = self._merge_metadata(transaction.metadata_payload, {"reversed": True, "reason": reason})
                 await self.transaction_repository.update_transaction(transaction, status=transaction.status, metadata_payload=transaction.metadata_payload)

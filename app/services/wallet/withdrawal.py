@@ -17,6 +17,7 @@ from app.models.transaction import Transaction
 from app.models.wallet import Wallet
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.ledger_service import LedgerService
 from app.services.user.bank_account import BankAccountService
 from app.utils.exceptions import DatabaseException, ProviderException, ValidationException, WalletException
 
@@ -40,6 +41,7 @@ class WalletWithdrawalService:
         session: AsyncSession | None = None,
         logger: logging.Logger | None = None,
         audit_service: Any | None = None,
+        ledger_service: LedgerService | None = None,
     ) -> None:
         self.wallet_repository = wallet_repository
         self.transaction_repository = transaction_repository
@@ -50,6 +52,7 @@ class WalletWithdrawalService:
         self.session = session
         self.logger = logger or logging.getLogger(__name__)
         self.audit_service = audit_service
+        self.ledger_service = ledger_service
 
     async def create_withdrawal(
         self,
@@ -112,6 +115,7 @@ class WalletWithdrawalService:
                     description=description or "Bank withdrawal",
                     metadata_payload=metadata,
                 )
+                opening_balance = wallet.available_balance
                 wallet.available_balance -= amount_value
                 wallet.locked_balance += amount_value
                 await self.wallet_repository.update_balance_fields(
@@ -120,6 +124,21 @@ class WalletWithdrawalService:
                     locked_balance=wallet.locked_balance,
                 )
                 await self.transaction_repository.create_transaction(transaction)
+                if self.ledger_service is not None:
+                    await self.ledger_service.create_debit_entry(
+                        wallet_id=wallet.id,
+                        user_id=wallet.user_id,
+                        transaction_reference=transaction.reference,
+                        transaction_type="WALLET_WITHDRAWAL",
+                        opening_balance=opening_balance,
+                        amount=amount_value,
+                        currency=wallet.currency,
+                        description=description or "Bank withdrawal reservation",
+                        related_transaction_id=transaction.id,
+                        created_by="wallet_withdrawal",
+                        status="POSTED",
+                        metadata={"source": "wallet_withdrawal", "kind": "reserve"},
+                    )
                 return {
                     "transaction_id": str(transaction.id),
                     "reference": transaction.reference,
@@ -387,6 +406,7 @@ class WalletWithdrawalService:
             raise ValidationException("Wallet not found.")
         if wallet.locked_balance < transaction.amount:
             raise WalletException("Withdrawal reservation is insufficient for release.")
+        opening_balance = wallet.available_balance
         wallet.available_balance += transaction.amount
         wallet.locked_balance -= transaction.amount
         if wallet.available_balance < 0 or wallet.locked_balance < 0:
@@ -396,6 +416,21 @@ class WalletWithdrawalService:
             available_balance=wallet.available_balance,
             locked_balance=wallet.locked_balance,
         )
+        if self.ledger_service is not None:
+            await self.ledger_service.create_credit_entry(
+                wallet_id=wallet.id,
+                user_id=wallet.user_id,
+                transaction_reference=transaction.reference,
+                transaction_type="WALLET_WITHDRAWAL_RELEASE",
+                opening_balance=opening_balance,
+                amount=transaction.amount,
+                currency=wallet.currency,
+                description=reason or "Withdrawal funds released",
+                related_transaction_id=transaction.id,
+                created_by="wallet_withdrawal",
+                status="POSTED",
+                metadata={"source": "wallet_withdrawal_release", "reason": reason},
+            )
         transaction.status = "failed"
         metadata: dict[str, Any] = {"provider_outcome": reason}
         if provider_error_type:

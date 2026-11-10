@@ -77,6 +77,17 @@ class FakeWalletRepository:
             setattr(wallet, field, value)
         return wallet
 
+    async def update_balance_fields(self, wallet, **fields):
+        return await self.update_wallet(wallet, **fields)
+
+
+class FakeLedgerService:
+    def __init__(self):
+        self.entries = []
+
+    async def create_credit_entry(self, **payload):
+        self.entries.append(payload)
+
 
 def _signed_webhook(payload: dict, *, secret: str) -> tuple[str, str]:
     timestamp = str(int(time.time()))
@@ -139,10 +150,12 @@ async def test_payment_webhook_rejects_duplicate_event_id() -> None:
     )
     repo = FakeTransactionRepository(transaction)
     wallet_repo = FakeWalletRepository(wallet)
+    ledger_service = FakeLedgerService()
     service = PaymentWebhookService(
         transaction_repository=repo,
         wallet_repository=wallet_repo,
         provider_service=None,
+        ledger_service=ledger_service,
     )
 
     payload = {
@@ -175,6 +188,7 @@ async def test_payment_webhook_rejects_duplicate_event_id() -> None:
     assert first["status"] == "succeeded"
     assert second["status"] == "succeeded"
     assert wallet.available_balance == Decimal("100.00")
+    assert len(ledger_service.entries) == 1
     assert "evt-duplicate" in str(transaction.metadata_payload or "") or transaction.metadata_payload is not None
 
 
@@ -212,10 +226,12 @@ async def test_payment_webhook_detects_duplicate_without_event_id() -> None:
     )
     repo = FakeTransactionRepository(transaction)
     wallet_repo = FakeWalletRepository(wallet)
+    ledger_service = FakeLedgerService()
     service = PaymentWebhookService(
         transaction_repository=repo,
         wallet_repository=wallet_repo,
         provider_service=None,
+        ledger_service=ledger_service,
     )
 
     payload = {
@@ -247,6 +263,7 @@ async def test_payment_webhook_detects_duplicate_without_event_id() -> None:
     assert first["status"] == "succeeded"
     assert second["status"] == "succeeded"
     assert wallet.available_balance == Decimal("250.00")
+    assert len(ledger_service.entries) == 1
 
 
 @pytest.mark.asyncio
@@ -283,10 +300,12 @@ async def test_payment_webhook_concurrent_duplicate_events_only_one_wallet_credi
     )
     repo = FakeTransactionRepository(transaction)
     wallet_repo = FakeWalletRepository(wallet)
+    ledger_service = FakeLedgerService()
     service = PaymentWebhookService(
         transaction_repository=repo,
         wallet_repository=wallet_repo,
         provider_service=None,
+        ledger_service=ledger_service,
     )
 
     payload = {
@@ -314,3 +333,135 @@ async def test_payment_webhook_concurrent_duplicate_events_only_one_wallet_credi
     assert first["status"] == "succeeded"
     assert second["status"] == "succeeded"
     assert wallet.available_balance == Decimal("300.00")
+    assert len(ledger_service.entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_payment_webhook_preserves_terminal_success_and_credits_once() -> None:
+    wallet = Wallet(
+        id=uuid4(),
+        user_id=uuid4(),
+        wallet_reference="wallet-terminal-success",
+        wallet_type="customer",
+        currency="NGN",
+        available_balance=Decimal("0"),
+        ledger_balance=Decimal("0"),
+        locked_balance=Decimal("0"),
+        metadata_payload=None,
+    )
+    transaction = Transaction(
+        id=uuid4(),
+        user_id=wallet.user_id,
+        wallet_id=wallet.id,
+        reference="ref-terminal-success",
+        transaction_type="payment",
+        category="payment",
+        amount=Decimal("100.00"),
+        currency="NGN",
+        charges=Decimal("0"),
+        total_amount=Decimal("100.00"),
+        status="pending",
+        provider_name="flutterwave",
+        provider_reference=None,
+        provider_transaction_id=None,
+        external_reference=None,
+        description="terminal success",
+        metadata_payload=None,
+    )
+    ledger_service = FakeLedgerService()
+    service = PaymentWebhookService(
+        transaction_repository=FakeTransactionRepository(transaction),
+        wallet_repository=FakeWalletRepository(wallet),
+        provider_service=None,
+        ledger_service=ledger_service,
+    )
+
+    async def send(event_id: str, status: str) -> dict:
+        payload = {
+            "event": "charge.updated",
+            "event_id": event_id,
+            "reference": transaction.reference,
+            "status": status,
+        }
+        signature, timestamp = _signed_webhook(payload, secret="secret")
+        return await service.process_payment_webhook(
+            provider_name="flutterwave",
+            event_id=event_id,
+            payload=payload,
+            signature=signature,
+            timestamp=timestamp,
+            secret="secret",
+        )
+
+    first = await send("evt-success-1", "successful")
+    second = await send("evt-success-2", "successful")
+    late_failure = await send("evt-failure-late", "failed")
+
+    assert first["status"] == "succeeded"
+    assert second["status"] == "succeeded"
+    assert late_failure["status"] == "succeeded"
+    assert wallet.available_balance == Decimal("100.00")
+    assert wallet.ledger_balance == Decimal("100.00")
+    assert len(ledger_service.entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_payment_webhook_does_not_credit_after_terminal_failure() -> None:
+    wallet = Wallet(
+        id=uuid4(),
+        user_id=uuid4(),
+        wallet_reference="wallet-terminal-failure",
+        wallet_type="customer",
+        currency="NGN",
+        available_balance=Decimal("0"),
+        ledger_balance=Decimal("0"),
+        locked_balance=Decimal("0"),
+        metadata_payload=None,
+    )
+    transaction = Transaction(
+        id=uuid4(),
+        user_id=wallet.user_id,
+        wallet_id=wallet.id,
+        reference="ref-terminal-failure",
+        transaction_type="payment",
+        category="payment",
+        amount=Decimal("100.00"),
+        currency="NGN",
+        charges=Decimal("0"),
+        total_amount=Decimal("100.00"),
+        status="failed",
+        provider_name="flutterwave",
+        provider_reference=None,
+        provider_transaction_id=None,
+        external_reference=None,
+        description="terminal failure",
+        metadata_payload=None,
+    )
+    ledger_service = FakeLedgerService()
+    service = PaymentWebhookService(
+        transaction_repository=FakeTransactionRepository(transaction),
+        wallet_repository=FakeWalletRepository(wallet),
+        provider_service=None,
+        ledger_service=ledger_service,
+    )
+    payload = {
+        "event": "charge.completed",
+        "event_id": "evt-success-after-failure",
+        "reference": transaction.reference,
+        "status": "successful",
+    }
+    signature, timestamp = _signed_webhook(payload, secret="secret")
+
+    result = await service.process_payment_webhook(
+        provider_name="flutterwave",
+        event_id="evt-success-after-failure",
+        payload=payload,
+        signature=signature,
+        timestamp=timestamp,
+        secret="secret",
+    )
+
+    assert result["status"] == "failed"
+    assert wallet.available_balance == Decimal("0")
+    assert wallet.ledger_balance == Decimal("0")
+    assert ledger_service.entries == []

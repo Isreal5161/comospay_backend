@@ -18,6 +18,7 @@ from app.controllers.payment_controller import (
     PaymentReconciliationRequest,
     PaymentVerificationRequest,
 )
+from app.repositories.ledger_repository import LedgerRepository
 from app.repositories.provider_repository import ProviderRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
@@ -25,6 +26,7 @@ from app.repositories.wallet_repository import WalletRepository
 from app.services.payment.payment import PaymentManager
 from app.services.payment.webhook import PaymentWebhookService
 from app.services.payment_service import PaymentService
+from app.services.ledger_service import LedgerService
 from app.services.provider.failover import ProviderFailoverService
 from app.services.provider.health import ProviderHealthService
 from app.services.provider.selector import ProviderSelector
@@ -53,17 +55,25 @@ async def get_payment_service(session: AsyncSession = Depends(get_db)) -> Paymen
     user_repository = UserRepository(session=session)
     wallet_repository = WalletRepository(session=session)
     transaction_repository = TransactionRepository(session=session)
+    ledger_service = LedgerService(
+        ledger_repository=LedgerRepository(session=session),
+        wallet_repository=wallet_repository,
+        user_repository=user_repository,
+        transaction_repository=transaction_repository,
+    )
 
     payment_manager = PaymentManager(
         user_repository=user_repository,
         wallet_repository=wallet_repository,
         transaction_repository=transaction_repository,
         provider_service=provider_service,
+        ledger_service=ledger_service,
     )
     webhook_service = PaymentWebhookService(
         transaction_repository=transaction_repository,
         wallet_repository=wallet_repository,
         provider_service=provider_service,
+        ledger_service=ledger_service,
     )
 
     return PaymentService(payment_manager=payment_manager, webhook_service=webhook_service)

@@ -5,11 +5,12 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, delete, func, or_, select
+from sqlalchemy import String, case, cast, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.transaction import Transaction
+from app.models.user import User
 from app.utils.exceptions import DuplicateProviderReferenceException
 
 
@@ -189,6 +190,15 @@ class TransactionRepository:
         result = await self.session.execute(select(Transaction).where(Transaction.id == transaction_id))
         return result.scalar_one_or_none()
 
+    async def get_admin_transaction_details(self, transaction_id: UUID) -> tuple[Transaction, User] | None:
+        """Retrieve an admin transaction together with its safe display owner fields."""
+        result = await self.session.execute(
+            select(Transaction, User)
+            .join(User, User.id == Transaction.user_id)
+            .where(Transaction.id == transaction_id)
+        )
+        return result.one_or_none()
+
     async def get_by_id_for_update(self, transaction_id: UUID) -> Transaction | None:
         """Retrieve a transaction by primary key while acquiring a row lock."""
         result = await self.session.execute(select(Transaction).where(Transaction.id == transaction_id).with_for_update())
@@ -287,9 +297,11 @@ class TransactionRepository:
         start_date: datetime | None = None,
         end_date: datetime | None = None,
         search: str | None = None,
+        provider: str | None = None,
         order_by: str = "created_at",
         descending: bool = True,
-    ) -> tuple[list[Transaction], int]:
+        include_user: bool = False,
+    ) -> tuple[list[Any], int]:
         """Retrieve admin-facing transaction listing with filtering, sorting, and pagination."""
         if page < 1:
             page = 1
@@ -298,43 +310,25 @@ class TransactionRepository:
         if page_size > 100:
             page_size = 100
 
-        query = select(Transaction)
-        count_query = select(func.count(Transaction.id))
-
-        if status:
-            query = query.where(Transaction.status == status)
-            count_query = count_query.where(Transaction.status == status)
-        if category:
-            query = query.where(Transaction.category == category)
-            count_query = count_query.where(Transaction.category == category)
-        if transaction_type:
-            query = query.where(Transaction.transaction_type == transaction_type)
-            count_query = count_query.where(Transaction.transaction_type == transaction_type)
-        if reference:
-            query = query.where(Transaction.reference == reference)
-            count_query = count_query.where(Transaction.reference == reference)
-        if user_id:
-            query = query.where(Transaction.user_id == UUID(user_id))
-            count_query = count_query.where(Transaction.user_id == UUID(user_id))
-        if currency:
-            query = query.where(Transaction.currency == currency.upper())
-            count_query = count_query.where(Transaction.currency == currency.upper())
-        if start_date is not None:
-            query = query.where(Transaction.created_at >= start_date)
-            count_query = count_query.where(Transaction.created_at >= start_date)
-        if end_date is not None:
-            query = query.where(Transaction.created_at <= end_date)
-            count_query = count_query.where(Transaction.created_at <= end_date)
-        if search and search.strip():
-            escaped_search = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            pattern = f"%{escaped_search}%"
-            search_filter = (
-                Transaction.reference.ilike(pattern, escape="\\")
-                | Transaction.provider_reference.ilike(pattern, escape="\\")
-                | Transaction.external_reference.ilike(pattern, escape="\\")
-            )
-            query = query.where(search_filter)
-            count_query = count_query.where(search_filter)
+        filters = self._admin_transaction_filters(
+            status=status,
+            category=category,
+            transaction_type=transaction_type,
+            reference=reference,
+            user_id=user_id,
+            currency=currency,
+            start_date=start_date,
+            end_date=end_date,
+            search=search,
+            provider=provider,
+        )
+        query = select(Transaction).join(User, User.id == Transaction.user_id)
+        if include_user:
+            query = select(Transaction, User).join(User, User.id == Transaction.user_id)
+        query = query.where(*filters)
+        count_query = select(func.count(Transaction.id)).select_from(Transaction).join(
+            User, User.id == Transaction.user_id
+        ).where(*filters)
 
         order_mapping = {
             "created_at": Transaction.created_at,
@@ -358,7 +352,85 @@ class TransactionRepository:
         result = await self.session.execute(
             query.order_by(order_column, Transaction.id).offset((page - 1) * page_size).limit(page_size)
         )
-        return list(result.scalars().all()), total
+        return (list(result.all()) if include_user else list(result.scalars().all())), total
+
+    async def get_admin_transaction_summary(self, **filters: Any) -> dict[str, int]:
+        """Return aggregate counts for the same filtered transaction set as the admin list."""
+        query_filters = self._admin_transaction_filters(**filters)
+        status = func.lower(Transaction.status)
+        result = await self.session.execute(
+            select(
+                func.count(Transaction.id).label("total"),
+                func.count(case((status.in_(self._CASE_INSENSITIVE_SUCCESS_STATUSES + ("settled",)), Transaction.id))).label("successful"),
+                func.count(case((status.in_(("pending", "processing", "funds_reserved")), Transaction.id))).label("pending"),
+                func.count(case((status == "failed", Transaction.id))).label("failed"),
+            )
+            .select_from(Transaction)
+            .join(User, User.id == Transaction.user_id)
+            .where(*query_filters)
+        )
+        row = result.one()
+        return {
+            "total": int(row.total or 0),
+            "successful": int(row.successful or 0),
+            "pending": int(row.pending or 0),
+            "failed": int(row.failed or 0),
+        }
+
+    @staticmethod
+    def _admin_transaction_filters(
+        *,
+        status: str | None = None,
+        category: str | None = None,
+        transaction_type: str | None = None,
+        reference: str | None = None,
+        user_id: str | None = None,
+        currency: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        search: str | None = None,
+        provider: str | None = None,
+    ) -> list[Any]:
+        filters: list[Any] = []
+        if status:
+            filters.append(func.lower(Transaction.status) == status.lower())
+        if category:
+            filters.append(func.lower(Transaction.category) == category.lower())
+        if transaction_type:
+            filters.append(func.lower(Transaction.transaction_type) == transaction_type.lower())
+        if reference:
+            filters.append(Transaction.reference == reference)
+        if user_id:
+            filters.append(Transaction.user_id == UUID(user_id))
+        if currency:
+            filters.append(Transaction.currency == currency.upper())
+        if start_date is not None:
+            filters.append(Transaction.created_at >= start_date)
+        if end_date is not None:
+            filters.append(Transaction.created_at <= end_date)
+        if provider:
+            filters.append(func.lower(Transaction.provider_name) == provider.lower())
+        if search and search.strip():
+            search_term = search.strip()
+            escaped_search = search_term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped_search}%"
+            search_conditions = [
+                Transaction.reference.ilike(pattern, escape="\\"),
+                cast(Transaction.id, String).ilike(pattern, escape="\\"),
+                Transaction.provider_reference.ilike(pattern, escape="\\"),
+                Transaction.external_reference.ilike(pattern, escape="\\"),
+                User.first_name.ilike(pattern, escape="\\"),
+                User.last_name.ilike(pattern, escape="\\"),
+                User.email.ilike(pattern, escape="\\"),
+            ]
+            try:
+                search_conditions.append(Transaction.id == UUID(search_term))
+            except ValueError:
+                pass
+            filters.append(
+                or_(*search_conditions)
+            )
+        return filters
 
     async def update_transaction(self, transaction: Transaction, **fields: Any) -> Transaction:
         """Update editable transaction fields in the database."""

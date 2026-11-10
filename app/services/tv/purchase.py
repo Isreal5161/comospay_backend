@@ -14,6 +14,7 @@ from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
 from app.services.provider_service import ProviderService
+from app.services.ledger_service import LedgerService
 from app.services.vtu.status import normalize_vtu_status
 from app.services.wallet_service import WalletService
 from app.utils.exceptions import PaymentException, ValidationException, WalletException
@@ -31,6 +32,7 @@ class TVPurchaseService:
         transaction_repository: TransactionRepository,
         user_repository: UserRepository,
         wallet_repository: WalletRepository,
+        ledger_service: LedgerService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.wallet_service = wallet_service
@@ -39,6 +41,7 @@ class TVPurchaseService:
         self.transaction_repository = transaction_repository
         self.user_repository = user_repository
         self.wallet_repository = wallet_repository
+        self.ledger_service = ledger_service
         self.logger = logger or logging.getLogger(__name__)
 
     async def purchase_tv(
@@ -69,15 +72,6 @@ class TVPurchaseService:
             package_code=package_code,
         )
 
-        await self._ensure_user_exists(user_id)
-        wallet = await self._resolve_wallet(user_id=user_id, wallet_id=wallet_id)
-        await self.wallet_service.verify_transaction_pin(user_id=user_id, pin=transaction_pin)
-
-        if not wallet.is_active or wallet.is_frozen or wallet.is_suspended:
-            raise WalletException("Wallet is not active for TV purchase.")
-        if wallet.available_balance < amount_value:
-            raise WalletException("Insufficient wallet balance for TV purchase.")
-
         reference = self.generate_reference()
         self.logger.info(
             "tv_purchase_started",
@@ -93,6 +87,14 @@ class TVPurchaseService:
         )
 
         async with self._transaction_scope():
+            await self._ensure_user_exists(user_id)
+            wallet = await self._resolve_wallet(user_id=user_id, wallet_id=wallet_id)
+            await self.wallet_service.verify_transaction_pin(user_id=user_id, pin=transaction_pin)
+            if not wallet.is_active or wallet.is_frozen or wallet.is_suspended:
+                raise WalletException("Wallet is not active for TV purchase.")
+            if wallet.available_balance < amount_value:
+                raise WalletException("Insufficient wallet balance for TV purchase.")
+
             transaction = Transaction(
                 reference=reference,
                 user_id=user_id,
@@ -137,7 +139,27 @@ class TVPurchaseService:
         metadata_payload: str | None = None,
     ) -> dict[str, Any]:
         """Dispatch a pending TV purchase to the provider and update its outcome."""
-        resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
+        transaction_reference = transaction.reference if transaction is not None else reference
+        if not transaction_reference:
+            raise ValidationException("TV purchase reference is required.")
+        async with self._transaction_scope():
+            resolved = await self.transaction_repository.get_by_reference_for_update(transaction_reference)
+            if resolved is None:
+                raise ValidationException("TV purchase reference was not found.")
+            if resolved.status in {"succeeded", "completed", "settled"}:
+                return await self._build_response(resolved)
+            metadata = self._parse_metadata(resolved.metadata_payload)
+            if metadata.get("provider_attempted") is True:
+                raise PaymentException(
+                    detail="TV provider outcome is pending reconciliation. Do not retry this purchase."
+                )
+            metadata["provider_attempted"] = True
+            metadata["provider_outcome_uncertain"] = True
+            resolved.metadata_payload = self._serialize_metadata(metadata)
+            await self.transaction_repository.update_transaction(
+                resolved,
+                metadata_payload=resolved.metadata_payload,
+            )
 
         self.logger.info("tv_purchase_provider_execution", extra={"reference": resolved.reference})
         try:
@@ -153,14 +175,22 @@ class TVPurchaseService:
                 )
             )
         except Exception as exc:
-            await self._handle_provider_failure(transaction=resolved, reason=str(exc))
-            raise PaymentException(detail=str(exc)) from exc
+            await self._mark_provider_outcome_pending(transaction=resolved)
+            self.logger.error(
+                "tv_purchase_provider_outcome_uncertain",
+                extra={"reference": resolved.reference, "error_type": type(exc).__name__},
+            )
+            raise PaymentException(
+                detail="TV provider outcome could not be confirmed. Check transaction status before retrying."
+            ) from exc
 
         status = self._normalize_status(provider_response.get("status"))
         async with self._transaction_scope():
-            transaction_record = await self.transaction_repository.get_by_reference(resolved.reference)
+            transaction_record = await self.transaction_repository.get_by_reference_for_update(resolved.reference)
             if transaction_record is None:
                 raise ValidationException("Purchase transaction was not found.")
+            if transaction_record.status in {"succeeded", "completed", "settled"}:
+                return await self._build_response(transaction_record)
 
             transaction_record.status = status
             transaction_record.provider_name = provider_name or provider_response.get("provider") or transaction_record.provider_name
@@ -170,8 +200,15 @@ class TVPurchaseService:
             transaction_record.metadata_payload = self._serialize_metadata(
                 {
                     **self._parse_metadata(transaction_record.metadata_payload),
-                    "provider_response": provider_response,
+                    "provider_response": {
+                        "status": status,
+                        "provider": provider_name or provider_response.get("provider"),
+                        "provider_reference": provider_response.get("provider_reference"),
+                        "provider_transaction_id": provider_response.get("provider_transaction_id"),
+                    },
                     "attempted": True,
+                    "provider_attempted": status not in {"failed", "cancelled", "reversed"},
+                    "provider_outcome_uncertain": status not in {"succeeded", "completed", "settled", "failed", "cancelled", "reversed"},
                 }
             )
             transaction_record = await self.transaction_repository.update_transaction(
@@ -185,9 +222,19 @@ class TVPurchaseService:
             )
 
             if status in {"failed", "cancelled", "reversed"}:
-                await self._handle_provider_failure(
-                    transaction=transaction_record,
-                    reason=provider_response.get("message") or "Provider reported a failed TV purchase.",
+                reason = "Provider reported a failed TV purchase."
+                await self._reverse_wallet_debit(transaction=transaction_record, reason=reason)
+                transaction_record.status = "reversed" if status == "reversed" else "failed"
+                metadata = self._parse_metadata(transaction_record.metadata_payload)
+                metadata["failure_reason"] = reason
+                metadata["provider_attempted"] = False
+                metadata["provider_outcome_uncertain"] = False
+                metadata["reversed"] = metadata.get("reversal_applied") is True
+                transaction_record.metadata_payload = self._serialize_metadata(metadata)
+                await self.transaction_repository.update_transaction(
+                    transaction_record,
+                    status=transaction_record.status,
+                    metadata_payload=transaction_record.metadata_payload,
                 )
             elif status in {"succeeded", "completed", "settled"}:
                 self.logger.info("tv_purchase_succeeded", extra={"reference": transaction_record.reference})
@@ -206,13 +253,32 @@ class TVPurchaseService:
         metadata_payload: str | None = None,
     ) -> dict[str, Any]:
         """Retry a pending or failed TV purchase through provider orchestration."""
-        resolved = await self._resolve_transaction(transaction=transaction, reference=reference)
-        if resolved.status in {"succeeded", "completed", "settled"}:
-            return await self._build_response(resolved)
-
-        wallet = await self._get_wallet_for_transaction(resolved)
-        if resolved.status in {"failed", "cancelled", "reversed"}:
-            await self._debit_wallet(transaction=resolved, wallet=wallet, amount=resolved.amount)
+        transaction_reference = transaction.reference if transaction is not None else reference
+        if not transaction_reference:
+            raise ValidationException("TV purchase reference is required.")
+        async with self._transaction_scope():
+            resolved = await self.transaction_repository.get_by_reference_for_update(transaction_reference)
+            if resolved is None:
+                raise ValidationException("TV purchase reference was not found.")
+            if resolved.status in {"succeeded", "completed", "settled"}:
+                return await self._build_response(resolved)
+            metadata = self._parse_metadata(resolved.metadata_payload)
+            if resolved.status == "pending" and metadata.get("provider_attempted") is True:
+                raise PaymentException(
+                    detail="TV provider outcome is pending reconciliation. Do not retry this purchase."
+                )
+            if resolved.status in {"failed", "cancelled", "reversed"}:
+                wallet = await self._get_wallet_for_transaction(resolved)
+                await self._debit_wallet(transaction=resolved, wallet=wallet, amount=resolved.amount)
+            resolved.status = "pending"
+            metadata["provider_attempted"] = False
+            metadata["provider_outcome_uncertain"] = False
+            resolved.metadata_payload = self._serialize_metadata(metadata)
+            await self.transaction_repository.update_transaction(
+                resolved,
+                status=resolved.status,
+                metadata_payload=resolved.metadata_payload,
+            )
 
         self.logger.info("tv_purchase_retry", extra={"reference": resolved.reference, "status": resolved.status})
         return await self.process_tv_purchase(
@@ -221,6 +287,10 @@ class TVPurchaseService:
             provider_name=provider_name,
             metadata_payload=metadata_payload,
         )
+
+    async def reverse_reconciled_failure(self, *, transaction: Transaction, reason: str) -> None:
+        """Reverse a failed transaction while its transaction row is locked by reconciliation."""
+        await self._reverse_wallet_debit(transaction=transaction, reason=reason)
 
     async def get_purchase_status(self, *, reference: str) -> dict[str, Any]:
         """Retrieve the current lifecycle state of a TV purchase."""
@@ -272,14 +342,37 @@ class TVPurchaseService:
         metadata = self._parse_metadata(transaction.metadata_payload)
         if metadata.get("debit_applied") is True:
             return
-        if wallet.available_balance < amount:
+        if transaction.wallet_id is None:
+            raise ValidationException("Wallet reference is missing for debit.")
+        locked_wallet = await self.wallet_repository.get_by_id_for_update(transaction.wallet_id)
+        if locked_wallet is None or locked_wallet.user_id != transaction.user_id:
+            raise ValidationException("Wallet was not found for debit.")
+        if not locked_wallet.is_active or locked_wallet.is_frozen or locked_wallet.is_suspended:
+            raise WalletException("Wallet is not active for TV purchase.")
+        if locked_wallet.available_balance < amount:
             raise WalletException("Insufficient wallet balance for TV purchase.")
-        wallet.available_balance = wallet.available_balance - amount
-        wallet.ledger_balance = wallet.ledger_balance - amount
+        if self.ledger_service is None:
+            raise ValidationException("TV purchase ledger service is unavailable.")
+        opening_balance = locked_wallet.available_balance
+        locked_wallet.available_balance = locked_wallet.available_balance - amount
+        locked_wallet.ledger_balance = locked_wallet.ledger_balance - amount
         await self.wallet_repository.update_balance_fields(
-            wallet,
-            available_balance=wallet.available_balance,
-            ledger_balance=wallet.ledger_balance,
+            locked_wallet,
+            available_balance=locked_wallet.available_balance,
+            ledger_balance=locked_wallet.ledger_balance,
+        )
+        await self.ledger_service.create_debit_entry(
+            wallet_id=locked_wallet.id,
+            user_id=locked_wallet.user_id,
+            transaction_reference=transaction.reference,
+            transaction_type="TV_PURCHASE",
+            opening_balance=opening_balance,
+            amount=amount,
+            currency=locked_wallet.currency,
+            description=transaction.description or "TV subscription purchase",
+            related_transaction_id=transaction.id,
+            status="POSTED",
+            metadata={"source": "tv_purchase"},
         )
         metadata["debit_applied"] = True
         transaction.metadata_payload = self._serialize_metadata(metadata)
@@ -295,15 +388,31 @@ class TVPurchaseService:
         if transaction.wallet_id is None:
             raise ValidationException("Wallet reference is missing for reversal.")
 
-        wallet = await self.wallet_repository.get_by_id(transaction.wallet_id)
-        if wallet is None:
+        wallet = await self.wallet_repository.get_by_id_for_update(transaction.wallet_id)
+        if wallet is None or wallet.user_id != transaction.user_id:
             raise ValidationException("Wallet was not found for reversal.")
+        if self.ledger_service is None:
+            raise ValidationException("TV purchase ledger service is unavailable.")
+        opening_balance = wallet.available_balance
         wallet.available_balance = wallet.available_balance + transaction.amount
         wallet.ledger_balance = wallet.ledger_balance + transaction.amount
         await self.wallet_repository.update_balance_fields(
             wallet,
             available_balance=wallet.available_balance,
             ledger_balance=wallet.ledger_balance,
+        )
+        await self.ledger_service.create_credit_entry(
+            wallet_id=wallet.id,
+            user_id=wallet.user_id,
+            transaction_reference=transaction.reference,
+            transaction_type="TV_PURCHASE_REVERSAL",
+            opening_balance=opening_balance,
+            amount=transaction.amount,
+            currency=wallet.currency,
+            description=reason or "TV purchase failure reversal",
+            related_transaction_id=transaction.id,
+            status="POSTED",
+            metadata={"source": "tv_purchase_reversal"},
         )
         metadata["debit_applied"] = False
         metadata["reversal_applied"] = True
@@ -313,20 +422,40 @@ class TVPurchaseService:
 
     async def _handle_provider_failure(self, *, transaction: Transaction, reason: str) -> None:
         async with self._transaction_scope():
-            current = await self.transaction_repository.get_by_reference(transaction.reference)
+            current = await self.transaction_repository.get_by_reference_for_update(transaction.reference)
             if current is None:
                 raise ValidationException("Purchase transaction was not found.")
+            if current.status in {"succeeded", "completed", "settled"}:
+                return
+            await self._reverse_wallet_debit(transaction=current, reason=reason)
             if current.status not in {"failed", "cancelled", "reversed"}:
                 current.status = "failed"
+            metadata = self._parse_metadata(current.metadata_payload)
+            metadata["failure_reason"] = reason
+            metadata["reversed"] = metadata.get("reversal_applied") is True
             current.metadata_payload = self._serialize_metadata(
-                {
-                    **self._parse_metadata(current.metadata_payload),
-                    "failure_reason": reason,
-                    "reversed": False,
-                }
+                metadata
             )
             await self.transaction_repository.update_transaction(current, status=current.status, metadata_payload=current.metadata_payload)
             self.logger.warning("tv_purchase_failed", extra={"reference": current.reference, "reason": reason})
+
+    async def _mark_provider_outcome_pending(self, *, transaction: Transaction) -> None:
+        async with self._transaction_scope():
+            current = await self.transaction_repository.get_by_reference_for_update(transaction.reference)
+            if current is None:
+                raise ValidationException("Purchase transaction was not found.")
+            if current.status in {"succeeded", "completed", "settled"}:
+                return
+            metadata = self._parse_metadata(current.metadata_payload)
+            metadata["provider_outcome_uncertain"] = True
+            metadata["provider_error"] = "provider outcome could not be confirmed"
+            current.status = "pending"
+            current.metadata_payload = self._serialize_metadata(metadata)
+            await self.transaction_repository.update_transaction(
+                current,
+                status=current.status,
+                metadata_payload=current.metadata_payload,
+            )
 
     async def _resolve_transaction(self, transaction: Transaction | None, reference: str | None) -> Transaction:
         if transaction is not None:
@@ -486,7 +615,18 @@ class TVPurchaseService:
         }
 
     def _transaction_scope(self):
-        return self.transaction_repository.session.begin()
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def scope():
+            session = self.transaction_repository.session
+            if session.in_transaction():
+                yield
+                return
+            async with session.begin():
+                yield
+
+        return scope()
 
 
 __all__ = ["TVPurchaseService"]

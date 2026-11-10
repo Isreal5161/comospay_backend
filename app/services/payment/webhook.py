@@ -13,6 +13,7 @@ from app.models.transaction import Transaction
 from app.models.wallet import Wallet
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.ledger_service import LedgerService
 from app.services.provider_service import ProviderService
 from app.utils.exceptions import PaymentException, ValidationException
 
@@ -26,12 +27,14 @@ class PaymentWebhookService:
         transaction_repository: TransactionRepository,
         wallet_repository: WalletRepository,
         provider_service: ProviderService,
+        ledger_service: LedgerService | None = None,
         logger: logging.Logger | None = None,
         max_timestamp_skew_seconds: int = 300,
     ) -> None:
         self.transaction_repository = transaction_repository
         self.wallet_repository = wallet_repository
         self.provider_service = provider_service
+        self.ledger_service = ledger_service
         self.logger = logger or logging.getLogger(__name__)
         self.max_timestamp_skew_seconds = max_timestamp_skew_seconds
 
@@ -104,6 +107,21 @@ class PaymentWebhookService:
             )
 
             normalized_status = self._normalize_status(payload)
+            if self._is_terminal_status(transaction.status):
+                if self._is_success_status(transaction.status) and self._is_success_status(normalized_status):
+                    await self._credit_wallet(transaction)
+                self.logger.info(
+                    "payment_webhook_terminal_state_ignored",
+                    extra={
+                        "provider": provider_name,
+                        "event_type": event_type,
+                        "reference": reference,
+                        "current_status": transaction.status,
+                        "incoming_status": normalized_status,
+                    },
+                )
+                return await self._build_response(transaction, event_type=event_type)
+
             transaction.status = normalized_status
             transaction.provider_name = provider_name
             transaction.provider_reference = self._extract_provider_reference(payload)
@@ -131,6 +149,25 @@ class PaymentWebhookService:
                 extra={"provider": provider_name, "event_type": event_type, "status": transaction.status, "reference": reference},
             )
             return await self._build_response(transaction, event_type=event_type)
+
+    def _is_success_status(self, status: str | None) -> bool:
+        normalized = str(status or "").strip().lower()
+        return normalized in {"succeeded", "successful", "completed", "settled", "posted"}
+
+    def _is_terminal_status(self, status: str | None) -> bool:
+        normalized = str(status or "").strip().lower()
+        return normalized in {
+            "succeeded",
+            "successful",
+            "completed",
+            "settled",
+            "posted",
+            "failed",
+            "cancelled",
+            "canceled",
+            "refunded",
+            "reversed",
+        }
 
     async def process_virtual_account_webhook(
         self,
@@ -183,15 +220,36 @@ class PaymentWebhookService:
 
     async def _credit_wallet(self, transaction: Transaction) -> None:
         metadata = self._parse_metadata(transaction.metadata_payload)
-        if metadata.get("wallet_credit_applied") is True:
+        if metadata.get("wallet_credit_applied") is True or metadata.get("credit_applied") is True:
             return
 
         wallet = await self.wallet_repository.get_by_id_for_update(transaction.wallet_id) if transaction.wallet_id else None
-        if wallet is None:
+        if wallet is None or wallet.user_id != transaction.user_id:
             raise ValidationException("Wallet was not found for webhook crediting.")
+        if self.ledger_service is None:
+            raise ValidationException("Payment ledger service is unavailable.")
+        opening_balance = wallet.available_balance
         wallet.available_balance = wallet.available_balance + transaction.amount
         wallet.ledger_balance = wallet.ledger_balance + transaction.amount
-        await self.wallet_repository.update_wallet(wallet, available_balance=wallet.available_balance, ledger_balance=wallet.ledger_balance)
+        await self.wallet_repository.update_balance_fields(
+            wallet,
+            available_balance=wallet.available_balance,
+            ledger_balance=wallet.ledger_balance,
+        )
+        await self.ledger_service.create_credit_entry(
+            wallet_id=wallet.id,
+            user_id=wallet.user_id,
+            transaction_reference=transaction.reference,
+            transaction_type="PAYMENT_CREDIT",
+            opening_balance=opening_balance,
+            amount=transaction.amount,
+            currency=wallet.currency,
+            description=transaction.description or "Payment wallet credit",
+            related_transaction_id=transaction.id,
+            created_by="payment_webhook",
+            status="POSTED",
+            metadata={"source": "payment_webhook"},
+        )
 
         metadata["wallet_credit_applied"] = True
         metadata["wallet_credit_source"] = "webhook"

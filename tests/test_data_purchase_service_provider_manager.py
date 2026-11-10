@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ class FakeWalletRepository:
             user_id=uuid4(),
             available_balance=Decimal("1000.00"),
             ledger_balance=Decimal("1000.00"),
+            currency="NGN",
             is_active=True,
             is_suspended=False,
             is_frozen=False,
@@ -28,6 +30,9 @@ class FakeWalletRepository:
         if wallet_id == self.wallet.id:
             return self.wallet
         return None
+
+    async def get_by_id_for_update(self, wallet_id):
+        return await self.get_by_id(wallet_id)
 
     async def get_user_wallet(self, *, user_id):
         if user_id == self.wallet.user_id:
@@ -57,18 +62,34 @@ class FakeUserRepository:
         return SimpleNamespace(id=user_id)
 
 
-class FakeQueryResult:
-    def __init__(self, transaction=None) -> None:
-        self._transaction = transaction
+class FakeLedgerService:
+    def __init__(self) -> None:
+        self.entries: list[dict] = []
 
-    def scalar_one_or_none(self):
-        return self._transaction
+    async def create_debit_entry(self, **payload):
+        self.entries.append({"entry_type": "DEBIT", **payload})
+
+    async def create_credit_entry(self, **payload):
+        self.entries.append({"entry_type": "CREDIT", **payload})
+
+
+class FakeQueryResult:
+    def __init__(self, transactions=None) -> None:
+        self._transactions = transactions if isinstance(transactions, list) else ([transactions] if transactions is not None else [])
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._transactions
 
 
 class FakeTransactionRepository:
     def __init__(self) -> None:
         self.transactions: dict[str, SimpleNamespace] = {}
         self.updated: list[dict] = []
+        self.executed_queries = []
+        self.query_result = None
         self.session = SimpleNamespace(begin=self._begin, execute=self._execute)
 
     def _begin(self):
@@ -79,7 +100,8 @@ class FakeTransactionRepository:
         return _ctx()
 
     async def _execute(self, query):
-        return FakeQueryResult()
+        self.executed_queries.append(query)
+        return FakeQueryResult(self.query_result)
 
     async def create_transaction(self, transaction):
         self.transactions[transaction.reference] = transaction
@@ -87,6 +109,9 @@ class FakeTransactionRepository:
 
     async def get_by_reference(self, reference):
         return self.transactions.get(reference)
+
+    async def get_by_reference_for_update(self, reference):
+        return await self.get_by_reference(reference)
 
     async def update_transaction(self, transaction, **kwargs):
         self.updated.append({"reference": transaction.reference, **kwargs})
@@ -131,6 +156,7 @@ async def test_data_purchase_service_executes_provider_manager_buy_data() -> Non
     wallet_repository.wallet.user_id = user_id
     transaction_repository = FakeTransactionRepository()
     provider_manager = FakeProviderManager()
+    ledger_service = FakeLedgerService()
 
     service = DataPurchaseService(
         wallet_service=FakeWalletService(wallet_repository),
@@ -138,6 +164,7 @@ async def test_data_purchase_service_executes_provider_manager_buy_data() -> Non
         provider_manager=provider_manager,
         transaction_repository=transaction_repository,
         user_repository=FakeUserRepository(),
+        ledger_service=ledger_service,
     )
 
     result = await service.purchase_data(
@@ -159,6 +186,8 @@ async def test_data_purchase_service_executes_provider_manager_buy_data() -> Non
     assert result["provider_transaction_id"] == "data-tx-001"
     assert wallet_repository.wallet.available_balance == Decimal("900.00")
     assert wallet_repository.wallet.ledger_balance == Decimal("900.00")
+    assert len(ledger_service.entries) == 1
+    assert ledger_service.entries[0]["entry_type"] == "DEBIT"
 
 
 @pytest.mark.asyncio
@@ -207,12 +236,13 @@ async def test_data_purchase_service_processes_existing_transaction_with_provide
 
 
 @pytest.mark.asyncio
-async def test_data_purchase_service_reverses_wallet_on_provider_failure() -> None:
+async def test_data_purchase_service_keeps_ambiguous_provider_outcome_pending() -> None:
     user_id = uuid4()
     wallet_repository = FakeWalletRepository()
     wallet_repository.wallet.user_id = user_id
     transaction_repository = FakeTransactionRepository()
     provider_manager = FakeProviderManager(error=RuntimeError("provider unavailable"))
+    ledger_service = FakeLedgerService()
 
     service = DataPurchaseService(
         wallet_service=FakeWalletService(wallet_repository),
@@ -220,6 +250,7 @@ async def test_data_purchase_service_reverses_wallet_on_provider_failure() -> No
         provider_manager=provider_manager,
         transaction_repository=transaction_repository,
         user_repository=FakeUserRepository(),
+        ledger_service=ledger_service,
     )
 
     with pytest.raises(PaymentException):
@@ -232,6 +263,106 @@ async def test_data_purchase_service_reverses_wallet_on_provider_failure() -> No
             transaction_pin="1234",
         )
 
-    assert wallet_repository.wallet.available_balance == Decimal("1000.00")
-    assert wallet_repository.wallet.ledger_balance == Decimal("1000.00")
+    assert wallet_repository.wallet.available_balance == Decimal("925.00")
+    assert wallet_repository.wallet.ledger_balance == Decimal("925.00")
+    assert len(ledger_service.entries) == 1
+    transaction = next(iter(transaction_repository.transactions.values()))
+    assert transaction.status == "pending"
+    assert json.loads(transaction.metadata_payload)["provider_outcome_uncertain"] is True
     assert provider_manager.calls[0]["operation"] == "buy_data"
+
+
+@pytest.mark.asyncio
+async def test_successful_data_purchase_does_not_block_a_legitimate_repeat() -> None:
+    transaction_repository = FakeTransactionRepository()
+    transaction_repository.query_result = SimpleNamespace(
+        status="completed",
+        metadata_payload=(
+            '{"phone_number":"08030000002","network":"AIRTEL",'
+            '"bundle_code":"AIRTEL-1GB","requested_amount":"75.00"}'
+        ),
+    )
+    service = DataPurchaseService(
+        wallet_service=SimpleNamespace(),
+        provider_service=SimpleNamespace(),
+        provider_manager=FakeProviderManager(),
+        transaction_repository=transaction_repository,
+        user_repository=FakeUserRepository(),
+    )
+
+    await service._ensure_no_duplicate_purchase(
+        user_id=uuid4(),
+        amount=Decimal("75.00"),
+        phone_number="08030000002",
+        network="AIRTEL",
+        bundle_code="AIRTEL-1GB",
+    )
+
+    query = transaction_repository.executed_queries[-1]
+    sql = str(query.compile(compile_kwargs={"literal_binds": True})).lower()
+    assert "pending" in sql
+    assert "processing" in sql
+    assert "succeeded" not in sql
+    assert "completed" not in sql
+    assert "settled" not in sql
+    assert "limit" not in sql
+    assert "scalar_one_or_none" not in sql
+
+
+@pytest.mark.asyncio
+async def test_matching_in_flight_data_purchase_is_still_rejected() -> None:
+    transaction_repository = FakeTransactionRepository()
+    transaction_repository.query_result = SimpleNamespace(
+        status="pending",
+        metadata_payload=(
+            '{"phone_number":"08030000002","network":"AIRTEL",'
+            '"bundle_code":"AIRTEL-1GB","requested_amount":"75.00"}'
+        )
+    )
+    service = DataPurchaseService(
+        wallet_service=SimpleNamespace(),
+        provider_service=SimpleNamespace(),
+        provider_manager=FakeProviderManager(),
+        transaction_repository=transaction_repository,
+        user_repository=FakeUserRepository(),
+    )
+
+    with pytest.raises(PaymentException, match="Duplicate data purchase"):
+        await service._ensure_no_duplicate_purchase(
+            user_id=uuid4(),
+            amount=Decimal("75.00"),
+            phone_number="08030000002",
+            network="AIRTEL",
+            bundle_code="AIRTEL-1GB",
+        )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_detection_checks_all_in_flight_matching_purchases() -> None:
+    transaction_repository = FakeTransactionRepository()
+    transaction_repository.query_result = [
+        SimpleNamespace(status="pending", metadata_payload='{"phone_number":"08030000003","network":"MTN"}'),
+        SimpleNamespace(
+            status="processing",
+            metadata_payload=(
+                '{"phone_number":"08030000002","network":"AIRTEL",'
+                '"bundle_code":"AIRTEL-1GB","requested_amount":"75.00"}'
+            )
+        ),
+    ]
+    service = DataPurchaseService(
+        wallet_service=SimpleNamespace(),
+        provider_service=SimpleNamespace(),
+        provider_manager=FakeProviderManager(),
+        transaction_repository=transaction_repository,
+        user_repository=FakeUserRepository(),
+    )
+
+    with pytest.raises(PaymentException, match="Duplicate data purchase"):
+        await service._ensure_no_duplicate_purchase(
+            user_id=uuid4(),
+            amount=Decimal("75.00"),
+            phone_number="08030000002",
+            network="AIRTEL",
+            bundle_code="AIRTEL-1GB",
+        )

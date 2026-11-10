@@ -12,6 +12,7 @@ from app.models.wallet import Wallet
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.ledger_service import LedgerService
 from app.services.provider_service import ProviderService
 from app.services.vtu.status import normalize_vtu_status
 from app.services.wallet_service import WalletService
@@ -29,6 +30,7 @@ class EducationPurchaseService:
         transaction_repository: TransactionRepository,
         user_repository: UserRepository,
         wallet_repository: WalletRepository,
+        ledger_service: LedgerService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.wallet_service = wallet_service
@@ -36,6 +38,7 @@ class EducationPurchaseService:
         self.transaction_repository = transaction_repository
         self.user_repository = user_repository
         self.wallet_repository = wallet_repository
+        self.ledger_service = ledger_service
         self.logger = logger or logging.getLogger(__name__)
 
     async def purchase_education(
@@ -298,6 +301,7 @@ class EducationPurchaseService:
             return
         if wallet.available_balance < amount:
             raise WalletException("Insufficient wallet balance for education purchase.")
+        opening_balance = wallet.available_balance
         wallet.available_balance = wallet.available_balance - amount
         wallet.ledger_balance = wallet.ledger_balance - amount
         await self.wallet_repository.update_balance_fields(
@@ -305,12 +309,29 @@ class EducationPurchaseService:
             available_balance=wallet.available_balance,
             ledger_balance=wallet.ledger_balance,
         )
+        if self.ledger_service is not None:
+            await self.ledger_service.create_debit_entry(
+                wallet_id=wallet.id,
+                user_id=wallet.user_id,
+                transaction_reference=transaction.reference,
+                transaction_type="EDUCATION_PURCHASE",
+                opening_balance=opening_balance,
+                amount=amount,
+                currency=wallet.currency,
+                description=transaction.description or "Education purchase",
+                related_transaction_id=transaction.id,
+                created_by="education",
+                status="POSTED",
+                metadata={"source": "education_purchase_debit"},
+            )
         metadata["debit_applied"] = True
         transaction.metadata_payload = self._serialize_metadata(metadata)
         await self.transaction_repository.update_transaction(transaction, metadata_payload=transaction.metadata_payload)
 
     async def _reverse_wallet_debit(self, *, transaction: Transaction, reason: str | None = None) -> None:
         metadata = self._parse_metadata(transaction.metadata_payload)
+        if metadata.get("reversal_applied") is True:
+            return
         if metadata.get("debit_applied") is not True:
             metadata["reversal_reason"] = reason or "wallet_debit_not_required"
             transaction.metadata_payload = self._serialize_metadata(metadata)
@@ -322,6 +343,7 @@ class EducationPurchaseService:
         wallet = await self.wallet_repository.get_by_id(transaction.wallet_id)
         if wallet is None:
             raise ValidationException("Wallet was not found for reversal.")
+        opening_balance = wallet.available_balance
         wallet.available_balance = wallet.available_balance + transaction.amount
         wallet.ledger_balance = wallet.ledger_balance + transaction.amount
         await self.wallet_repository.update_balance_fields(
@@ -329,6 +351,21 @@ class EducationPurchaseService:
             available_balance=wallet.available_balance,
             ledger_balance=wallet.ledger_balance,
         )
+        if self.ledger_service is not None:
+            await self.ledger_service.create_credit_entry(
+                wallet_id=wallet.id,
+                user_id=wallet.user_id,
+                transaction_reference=transaction.reference,
+                transaction_type="EDUCATION_PURCHASE_REVERSAL",
+                opening_balance=opening_balance,
+                amount=transaction.amount,
+                currency=wallet.currency,
+                description=reason or "Education purchase reversal",
+                related_transaction_id=transaction.id,
+                created_by="education",
+                status="POSTED",
+                metadata={"source": "education_purchase_reversal", "reason": reason},
+            )
         metadata["debit_applied"] = False
         metadata["reversal_applied"] = True
         metadata["reversal_reason"] = reason or "education_purchase_reversed"

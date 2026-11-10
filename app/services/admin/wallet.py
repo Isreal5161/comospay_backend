@@ -408,6 +408,61 @@ class WalletAdministrationService:
             "meta": {"source": "admin.wallet.ledger"},
         }
 
+    async def list_admin_adjustments(self, **payload: Any) -> dict[str, Any]:
+        self._require_wallet_repository()
+        await self._require_authorized_admin(payload)
+        if self.ledger_repository is None:
+            raise ValidationException(
+                detail="Wallet ledger retrieval is unavailable.",
+                error_code="ADMIN_WALLET_LEDGER_UNAVAILABLE",
+            )
+
+        page = int(payload.get("page") or 1)
+        page_size = int(payload.get("page_size") or 20)
+        start_date = payload.get("start_date")
+        end_date = payload.get("end_date")
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise ValidationException(detail="Invalid ledger pagination.", error_code="INVALID_PAGINATION")
+        if start_date is not None and not isinstance(start_date, datetime):
+            raise ValidationException(detail="Start date is invalid.", error_code="INVALID_DATE_RANGE")
+        if end_date is not None and not isinstance(end_date, datetime):
+            raise ValidationException(detail="End date is invalid.", error_code="INVALID_DATE_RANGE")
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise ValidationException(detail="Start date must not be after end date.", error_code="INVALID_DATE_RANGE")
+
+        entries, total = await self.ledger_repository.list_admin_adjustments(
+            page=page,
+            page_size=page_size,
+            search=self._optional_text(payload.get("search")),
+            start_date=start_date,
+            end_date=end_date,
+        )
+        items = []
+        for entry, user in entries:
+            serialized = self._serialize_ledger_entry(entry)
+            serialized["source"] = "ledger_adjustment"
+            serialized["user"] = {
+                "id": str(user.id),
+                "name": " ".join(
+                    part.strip()
+                    for part in (user.first_name, user.last_name)
+                    if isinstance(part, str) and part.strip()
+                ) or None,
+                "email": user.email,
+            }
+            items.append(serialized)
+        return {
+            "success": True,
+            "data": {
+                "items": items,
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": (total + page_size - 1) // page_size,
+            },
+            "meta": {"source": "admin.wallet.adjustments"},
+        }
+
     async def get_user_ledger_by_reference(
         self,
         *,

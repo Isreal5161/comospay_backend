@@ -536,6 +536,31 @@ class AdminController:
             success_message="Wallet ledger retrieved successfully.",
         )
 
+    async def list_admin_adjustments(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=None, request=request)
+        return await self._execute(
+            action="list_admin_adjustments",
+            handler=self._resolve_handler("list_admin_adjustments"),
+            payload={
+                "admin_id": target_admin_id,
+                "page": page,
+                "page_size": page_size,
+                "search": search,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            success_message="Admin wallet adjustments retrieved successfully.",
+        )
+
     async def get_user_ledger_by_reference(
         self,
         user_id: UUID,
@@ -676,6 +701,7 @@ class AdminController:
         transaction_type: str | None = None,
         currency: str | None = None,
         search: str | None = None,
+        provider: str | None = None,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
         order_by: str = "created_at",
@@ -698,6 +724,7 @@ class AdminController:
                 "transaction_type": transaction_type,
                 "currency": currency,
                 "search": search,
+                "provider": provider,
                 "start_date": start_date,
                 "end_date": end_date,
                 "order_by": order_by,

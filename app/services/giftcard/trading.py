@@ -15,6 +15,7 @@ from app.schemas.giftcard_schema import GiftCardSellSubmission
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.ledger_service import LedgerService
 from app.services.provider_service import ProviderService
 from app.services.wallet_service import WalletService
 from app.utils.exceptions import GiftCardException, ProviderException, ValidationException, WalletException
@@ -31,6 +32,7 @@ class GiftCardTradingService:
         transaction_repository: TransactionRepository,
         user_repository: UserRepository,
         wallet_repository: WalletRepository,
+        ledger_service: LedgerService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.wallet_service = wallet_service
@@ -38,6 +40,7 @@ class GiftCardTradingService:
         self.transaction_repository = transaction_repository
         self.user_repository = user_repository
         self.wallet_repository = wallet_repository
+        self.ledger_service = ledger_service
         self.logger = logger or logging.getLogger(__name__)
 
     async def buy_giftcard(
@@ -82,6 +85,7 @@ class GiftCardTradingService:
         if reference is not None:
             existing = await self.transaction_repository.get_by_reference(reference.strip())
             if existing is not None:
+                self._validate_reference_owner(existing, user_id=user_id, transaction_type="giftcard_buy")
                 return await self._build_response(existing)
 
         reference_value = reference.strip() if reference is not None else self.generate_reference("buy")
@@ -180,6 +184,7 @@ class GiftCardTradingService:
         if reference is not None:
             existing = await self.transaction_repository.get_by_reference(reference.strip())
             if existing is not None:
+                self._validate_reference_owner(existing, user_id=user_id, transaction_type="giftcard_sell")
                 return await self._build_response(existing)
 
         reference_value = reference.strip() if reference is not None else self.generate_reference("sell")
@@ -402,6 +407,7 @@ class GiftCardTradingService:
     async def _debit_wallet(self, *, transaction: Transaction, wallet: Wallet, amount: Decimal) -> None:
         if wallet.available_balance < amount:
             raise WalletException("Insufficient wallet balance for gift card purchase.")
+        opening_balance = wallet.available_balance
         wallet.available_balance = wallet.available_balance - amount
         wallet.ledger_balance = wallet.ledger_balance - amount
         await self.wallet_repository.update_balance_fields(
@@ -409,12 +415,28 @@ class GiftCardTradingService:
             available_balance=wallet.available_balance,
             ledger_balance=wallet.ledger_balance,
         )
+        if self.ledger_service is not None:
+            await self.ledger_service.create_debit_entry(
+                wallet_id=wallet.id,
+                user_id=wallet.user_id,
+                transaction_reference=transaction.reference,
+                transaction_type=transaction.transaction_type.upper(),
+                opening_balance=opening_balance,
+                amount=amount,
+                currency=wallet.currency,
+                description=transaction.description or "Gift card purchase",
+                related_transaction_id=transaction.id,
+                created_by="giftcard",
+                status="POSTED",
+                metadata={"source": "giftcard_purchase_debit"},
+            )
         metadata = self._parse_metadata(transaction.metadata_payload)
         metadata["debit_applied"] = True
         transaction.metadata_payload = self._serialize_metadata(metadata)
         await self.transaction_repository.update_transaction(transaction, metadata_payload=transaction.metadata_payload)
 
     async def _credit_wallet(self, *, transaction: Transaction, wallet: Wallet, amount: Decimal) -> None:
+        opening_balance = wallet.available_balance
         wallet.available_balance = wallet.available_balance + amount
         wallet.ledger_balance = wallet.ledger_balance + amount
         await self.wallet_repository.update_balance_fields(
@@ -422,6 +444,21 @@ class GiftCardTradingService:
             available_balance=wallet.available_balance,
             ledger_balance=wallet.ledger_balance,
         )
+        if self.ledger_service is not None:
+            await self.ledger_service.create_credit_entry(
+                wallet_id=wallet.id,
+                user_id=wallet.user_id,
+                transaction_reference=transaction.reference,
+                transaction_type=transaction.transaction_type.upper(),
+                opening_balance=opening_balance,
+                amount=amount,
+                currency=wallet.currency,
+                description=transaction.description or "Gift card sale payout",
+                related_transaction_id=transaction.id,
+                created_by="giftcard",
+                status="POSTED",
+                metadata={"source": "giftcard_sale_credit"},
+            )
         metadata = self._parse_metadata(transaction.metadata_payload)
         metadata["credit_applied"] = True
         transaction.metadata_payload = self._serialize_metadata(metadata)
@@ -429,6 +466,8 @@ class GiftCardTradingService:
 
     async def _reverse_wallet_debit(self, *, transaction: Transaction, reason: str | None = None) -> None:
         metadata = self._parse_metadata(transaction.metadata_payload)
+        if metadata.get("reversal_applied") is True:
+            return
         if metadata.get("debit_applied") is not True:
             metadata["reversal_reason"] = reason or "wallet_debit_not_required"
             transaction.metadata_payload = self._serialize_metadata(metadata)
@@ -436,6 +475,7 @@ class GiftCardTradingService:
             return
 
         wallet = await self._get_wallet_for_transaction(transaction)
+        opening_balance = wallet.available_balance
         wallet.available_balance = wallet.available_balance + transaction.amount
         wallet.ledger_balance = wallet.ledger_balance + transaction.amount
         await self.wallet_repository.update_balance_fields(
@@ -443,6 +483,21 @@ class GiftCardTradingService:
             available_balance=wallet.available_balance,
             ledger_balance=wallet.ledger_balance,
         )
+        if self.ledger_service is not None:
+            await self.ledger_service.create_credit_entry(
+                wallet_id=wallet.id,
+                user_id=wallet.user_id,
+                transaction_reference=transaction.reference,
+                transaction_type=f"{transaction.transaction_type.upper()}_REVERSAL",
+                opening_balance=opening_balance,
+                amount=transaction.amount,
+                currency=wallet.currency,
+                description=reason or "Gift card reversal",
+                related_transaction_id=transaction.id,
+                created_by="giftcard",
+                status="POSTED",
+                metadata={"source": "giftcard_reversal", "reason": reason},
+            )
         metadata["debit_applied"] = False
         metadata["reversal_applied"] = True
         metadata["reversal_reason"] = reason or "giftcard_purchase_reversed"
@@ -494,6 +549,18 @@ class GiftCardTradingService:
         if resolved is None:
             raise ValidationException("Gift card trade transaction was not found.")
         return resolved
+
+    def _validate_reference_owner(
+        self,
+        transaction: Transaction,
+        *,
+        user_id: UUID,
+        transaction_type: str,
+    ) -> None:
+        if transaction.user_id != user_id:
+            raise ValidationException("Gift card transaction reference does not belong to this user.")
+        if transaction.transaction_type != transaction_type:
+            raise ValidationException("Gift card transaction reference is already used for a different transaction.")
 
     def _validate_trade_request(
         self,

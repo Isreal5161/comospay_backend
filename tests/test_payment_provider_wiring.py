@@ -86,7 +86,7 @@ class FakeTransactionRepository:
     def __init__(self) -> None:
         self.transactions: dict[str, Transaction] = {}
         self.calls: list[dict] = []
-        self.session = SimpleNamespace(begin=self._begin)
+        self.session = SimpleNamespace(begin=self._begin, in_transaction=lambda: False)
 
     def _begin(self):
         @contextlib.asynccontextmanager
@@ -96,6 +96,9 @@ class FakeTransactionRepository:
         return _ctx()
 
     async def get_by_reference(self, reference):
+        return self.transactions.get(reference)
+
+    async def get_by_reference_for_update(self, reference):
         return self.transactions.get(reference)
 
     async def create_transaction(self, transaction):

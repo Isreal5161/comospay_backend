@@ -6,11 +6,12 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import String, cast, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.ledger import Ledger
+from app.models.user import User
 from app.utils.exceptions import DatabaseException, ValidationException
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,57 @@ class LedgerRepository:
         except SQLAlchemyError as exc:
             logger.exception("Failed to list wallet ledger entries")
             raise DatabaseException(detail="Unable to fetch ledger records.") from exc
+
+    async def list_admin_adjustments(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        search: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> tuple[list[tuple[Ledger, User]], int]:
+        """List manual admin wallet adjustments as ledger records, without converting them to transactions."""
+        filters: list[Any] = [
+            Ledger.transaction_type.in_(("ADMIN_CREDIT", "ADMIN_DEBIT")),
+            Ledger.created_by.like("admin:%"),
+        ]
+        if start_date is not None:
+            filters.append(Ledger.created_at >= start_date)
+        if end_date is not None:
+            filters.append(Ledger.created_at <= end_date)
+        if search and search.strip():
+            escaped_search = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped_search}%"
+            filters.append(
+                or_(
+                    Ledger.transaction_reference.ilike(pattern, escape="\\"),
+                    cast(Ledger.ledger_id, String).ilike(pattern, escape="\\"),
+                    User.first_name.ilike(pattern, escape="\\"),
+                    User.last_name.ilike(pattern, escape="\\"),
+                    User.email.ilike(pattern, escape="\\"),
+                )
+            )
+
+        base_query = select(Ledger, User).join(User, User.id == Ledger.user_id).where(*filters)
+        count_query = (
+            select(func.count(Ledger.ledger_id))
+            .select_from(Ledger)
+            .join(User, User.id == Ledger.user_id)
+            .where(*filters)
+        )
+        try:
+            count_result = await self.session.execute(count_query)
+            total = int(count_result.scalar_one() or 0)
+            result = await self.session.execute(
+                base_query.order_by(Ledger.created_at.desc(), Ledger.ledger_id)
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            return list(result.all()), total
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to list admin wallet adjustments")
+            raise DatabaseException(detail="Unable to fetch admin wallet adjustments.") from exc
 
     async def get_by_user_id(self, user_id: UUID) -> list[Ledger]:
         """Retrieve ledger entries for a user."""

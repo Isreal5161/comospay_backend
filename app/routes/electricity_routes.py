@@ -20,6 +20,7 @@ from app.controllers.electricity_controller import (
     ProvidersRequest,
 )
 from app.routes.notification_routes import build_notification_service
+from app.repositories.ledger_repository import LedgerRepository
 from app.repositories.provider_repository import ProviderRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
@@ -31,6 +32,7 @@ from app.services.electricity.purchase import ElectricityPurchaseService
 from app.services.electricity.reconciliation import ElectricityReconciliationService
 from app.services.electricity.validation import ElectricityValidationService
 from app.services.electricity_service import ElectricityService
+from app.services.ledger_service import LedgerService
 from app.services.provider.failover import ProviderFailoverService
 from app.services.provider.health import ProviderHealthService
 from app.services.provider.selector import ProviderSelector
@@ -67,6 +69,12 @@ async def get_electricity_service(session: AsyncSession = Depends(get_db)) -> El
     user_repository = UserRepository(session=session)
     wallet_repository = WalletRepository(session=session)
     transaction_repository = TransactionRepository(session=session)
+    ledger_service = LedgerService(
+        ledger_repository=LedgerRepository(session=session),
+        wallet_repository=wallet_repository,
+        user_repository=user_repository,
+        transaction_repository=transaction_repository,
+    )
     settings_repository = SystemSettingsRepository(session=session)
 
     wallet_service = _build_wallet_service(
@@ -88,11 +96,13 @@ async def get_electricity_service(session: AsyncSession = Depends(get_db)) -> El
         transaction_repository=transaction_repository,
         user_repository=user_repository,
         wallet_repository=wallet_repository,
+        ledger_service=ledger_service,
     )
     reconciliation_service = ElectricityReconciliationService(
         provider_service=provider_service,
         transaction_repository=transaction_repository,
         settings_repository=settings_repository,
+        purchase_service=purchase_service,
     )
 
     return ElectricityService(

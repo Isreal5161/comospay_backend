@@ -12,6 +12,7 @@ from app.models.transaction import Transaction
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.services.provider_service import ProviderService
+from app.services.tv.purchase import TVPurchaseService
 from app.utils.exceptions import ValidationException
 
 
@@ -29,6 +30,7 @@ class TVReconciliationService:
         provider_service: ProviderService,
         transaction_repository: TransactionRepository,
         settings_repository: SystemSettingsRepository,
+        purchase_service: TVPurchaseService | None = None,
         redis_client: Redis | None = None,
         logger: logging.Logger | None = None,
         batch_size: int = 100,
@@ -37,6 +39,7 @@ class TVReconciliationService:
         self.provider_service = provider_service
         self.transaction_repository = transaction_repository
         self.settings_repository = settings_repository
+        self.purchase_service = purchase_service
         self.redis_client = redis_client
         self.logger = logger or logging.getLogger(__name__)
         self.batch_size = max(1, batch_size)
@@ -51,29 +54,41 @@ class TVReconciliationService:
     ) -> dict[str, Any]:
         """Reconcile a single TV transaction against provider state and update its internal record."""
         self._validate_reference(reference)
-        transaction = await self.transaction_repository.get_by_reference(reference)
-        if transaction is None:
-            raise ValidationException("Transaction reference was not found.")
-
-        self.logger.info("tv_reconciliation_started", extra={"reference": reference})
-        if transaction.status in {"completed", "succeeded", "settled"} and provider_operation is None:
-            return await self._build_response(transaction, matched=True)
-
         if provider_operation is None:
             raise ValidationException("A provider operation callback is required for TV reconciliation.")
 
         async with self._transaction_scope():
+            transaction = await self.transaction_repository.get_by_reference_for_update(reference)
+            if transaction is None:
+                raise ValidationException("Transaction reference was not found.")
+            self.logger.info("tv_reconciliation_started", extra={"reference": reference})
             provider_response = await self._query_provider(
                 transaction=transaction,
                 provider_operation=provider_operation,
                 provider_name=provider_name,
             )
             reconciliation = self._compare_status(transaction=transaction, provider_response=provider_response)
+            resolved_status = reconciliation["resolved_status"]
+            terminal_statuses = {"completed", "succeeded", "settled", "failed", "cancelled", "reversed", "refunded"}
+            if transaction.status in terminal_statuses and resolved_status != transaction.status:
+                resolved_status = transaction.status
+                reconciliation["discrepancy"] = {
+                    "type": "terminal_status_preserved",
+                    "message": "A terminal transaction status cannot be changed automatically by reconciliation.",
+                    "provider_status": provider_response.get("status"),
+                }
             transaction.provider_name = provider_name or transaction.provider_name or provider_response.get("provider")
             transaction.provider_reference = provider_response.get("provider_reference") or transaction.provider_reference
             transaction.provider_transaction_id = provider_response.get("provider_transaction_id") or transaction.provider_transaction_id
             transaction.external_reference = transaction.provider_reference
-            transaction.status = reconciliation["resolved_status"]
+            transaction.status = resolved_status
+            if transaction.status in {"failed", "cancelled", "reversed"}:
+                if self.purchase_service is None:
+                    raise ValidationException("TV purchase settlement service is unavailable for reversal.")
+                await self.purchase_service.reverse_reconciled_failure(
+                    transaction=transaction,
+                    reason="TV provider reconciliation confirmed failure.",
+                )
             transaction.metadata_payload = self._update_reconciliation_metadata(
                 transaction.metadata_payload,
                 {
@@ -132,17 +147,19 @@ class TVReconciliationService:
         if provider_operation is None:
             raise ValidationException("A provider operation callback is required for reconciliation retry.")
 
-        transaction = await self.transaction_repository.get_by_reference(reference)
-        if transaction is None:
-            raise ValidationException("Transaction reference was not found.")
-
-        transaction.status = "pending"
-        transaction.metadata_payload = self._update_reconciliation_metadata(
-            transaction.metadata_payload,
-            {"event": "retry_scheduled", "provider_name": provider_name, "scheduled_at": self._now_iso()},
-        )
-        await self.transaction_repository.update_transaction(transaction, status=transaction.status, metadata_payload=transaction.metadata_payload)
-        self.logger.info("tv_reconciliation_retry_scheduled", extra={"reference": reference})
+        async with self._transaction_scope():
+            transaction = await self.transaction_repository.get_by_reference_for_update(reference)
+            if transaction is None:
+                raise ValidationException("Transaction reference was not found.")
+            transaction.metadata_payload = self._update_reconciliation_metadata(
+                transaction.metadata_payload,
+                {"event": "reconciliation_retry_requested", "provider_name": provider_name, "scheduled_at": self._now_iso()},
+            )
+            await self.transaction_repository.update_transaction(
+                transaction,
+                metadata_payload=transaction.metadata_payload,
+            )
+        self.logger.info("tv_reconciliation_retry_requested", extra={"reference": reference})
         return await self.reconcile_transaction(reference=reference, provider_operation=provider_operation, provider_name=provider_name)
 
     async def detect_discrepancies(
@@ -233,7 +250,12 @@ class TVReconciliationService:
         page_size = page_size or self.batch_size
         results: list[dict[str, Any]] = []
         while True:
-            transactions, _ = await self.transaction_repository.get_transactions_by_status(status=status, page=page, page_size=page_size)
+            async with self.transaction_repository.session.begin():
+                transactions, _ = await self.transaction_repository.get_transactions_by_status(
+                    status=status,
+                    page=page,
+                    page_size=page_size,
+                )
             if not transactions:
                 break
             for transaction in transactions:
@@ -300,7 +322,7 @@ class TVReconciliationService:
                 discrepancy["type"] = "duplicate_callback"
                 discrepancy["message"] = "Duplicate provider callback detected."
             elif provider_status == "timeout":
-                resolved_status = "timeout"
+                resolved_status = "pending"
                 discrepancy["type"] = "timed_out"
                 discrepancy["message"] = "Provider reported a timed-out transaction."
             elif provider_status == "reversed":

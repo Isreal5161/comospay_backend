@@ -169,6 +169,7 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
             wallet_repository=wallet_repository,
             transaction_repository=transaction_repository,
             session=session,
+            ledger_service=ledger_service,
         )
         account_lockout_service = AccountLockoutService(user_repository=user_repository, logger=logger)
         account_state_service = UserAccountStateService()
@@ -248,6 +249,7 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
             transaction_service=TransactionAdministrationService(
                 logger=logger,
                 transaction_repository=transaction_repository,
+                ledger_repository=ledger_repository,
                 admin_repository=admin_repository,
                 audit_repository=audit_repository,
                 notification_service=notification_service,
@@ -620,6 +622,26 @@ async def get_user_ledger_by_reference(
     )
 
 
+@router.get("/wallet-adjustments", status_code=status.HTTP_200_OK)
+async def list_admin_wallet_adjustments(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=255),
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.list_admin_adjustments(
+        page=page,
+        page_size=page_size,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+        request=request,
+    )
+
+
 @router.get("/wallets/{wallet_id}/analytics", status_code=status.HTTP_200_OK)
 async def wallet_analytics(
     wallet_id: str,
@@ -700,6 +722,7 @@ async def list_transactions(
     transaction_type: str | None = Query(default=None, max_length=100),
     currency: str | None = Query(default=None, min_length=3, max_length=10),
     search: str | None = Query(default=None, max_length=255),
+    provider: str | None = Query(default=None, max_length=100),
     start_date: datetime | None = None,
     end_date: datetime | None = None,
     order_by: Literal[
@@ -724,6 +747,7 @@ async def list_transactions(
         transaction_type=transaction_type,
         currency=currency,
         search=search,
+        provider=provider,
         start_date=start_date,
         end_date=end_date,
         order_by=order_by,

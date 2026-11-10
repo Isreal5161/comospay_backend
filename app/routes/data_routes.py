@@ -19,6 +19,7 @@ from app.controllers.data_controller import (
     DataReconciliationRequest,
     DataStatusRequest,
 )
+from app.repositories.ledger_repository import LedgerRepository
 from app.repositories.provider_repository import ProviderRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
@@ -30,6 +31,7 @@ from app.services.data.purchase import DataPurchaseService
 from app.services.data.reconciliation import DataReconciliationService
 from app.services.data.validation import DataValidationService
 from app.services.data_service import DataService
+from app.services.ledger_service import LedgerService
 from app.services.provider.failover import ProviderFailoverService
 from app.services.provider.health import ProviderHealthService
 from app.services.provider.selector import ProviderSelector
@@ -68,6 +70,12 @@ async def get_data_service(session: AsyncSession = Depends(get_db)) -> DataServi
     wallet_repository = WalletRepository(session=session)
     transaction_repository = TransactionRepository(session=session)
     settings_repository = SystemSettingsRepository(session=session)
+    ledger_service = LedgerService(
+        ledger_repository=LedgerRepository(session=session),
+        wallet_repository=wallet_repository,
+        user_repository=user_repository,
+        transaction_repository=transaction_repository,
+    )
 
     wallet_service = _build_wallet_service(
         session=session,
@@ -80,6 +88,7 @@ async def get_data_service(session: AsyncSession = Depends(get_db)) -> DataServi
         provider_service=provider_service,
         transaction_repository=transaction_repository,
         user_repository=user_repository,
+        ledger_service=ledger_service,
     )
     validation_service = DataValidationService(wallet_service=wallet_service)
     pricing_service = DataPricingService(
