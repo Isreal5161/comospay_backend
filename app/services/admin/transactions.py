@@ -94,6 +94,14 @@ class TransactionAdministrationService:
             raise ValidationException(detail="Page size must be between 1 and 100.", error_code="INVALID_PAGE_SIZE")
         status = self._optional_text(payload.get("status"))
         category = self._optional_text(payload.get("category"))
+        categories = payload.get("categories")
+        if categories is not None and (
+            not isinstance(categories, (list, tuple))
+            or not categories
+            or any(not isinstance(value, str) or not value.strip() for value in categories)
+        ):
+            raise ValidationException(detail="Transaction categories are invalid.", error_code="INVALID_CATEGORY")
+        categories = tuple(value.strip() for value in categories) if categories is not None else None
         transaction_type = self._optional_text(payload.get("transaction_type"))
         reference = self._optional_text(payload.get("reference"))
         user_id = self._optional_text(payload.get("user_id"))
@@ -102,6 +110,7 @@ class TransactionAdministrationService:
         end_date = payload.get("end_date")
         search = self._optional_text(payload.get("search"))
         provider = self._optional_text(payload.get("provider"))
+        method = self._optional_text(payload.get("method"))
         order_by = str(payload.get("order_by") or "created_at")
         descending = bool(payload.get("descending", True))
         if order_by not in self._LIST_SORT_FIELDS:
@@ -125,6 +134,7 @@ class TransactionAdministrationService:
             page_size=page_size,
             status=status,
             category=category,
+            categories=categories,
             transaction_type=transaction_type,
             reference=reference,
             user_id=user_id,
@@ -133,6 +143,7 @@ class TransactionAdministrationService:
             end_date=end_date,
             search=search,
             provider=provider,
+            method=method,
             order_by=order_by,
             descending=descending,
             include_user=True,
@@ -144,6 +155,7 @@ class TransactionAdministrationService:
         summary = await self.transaction_repository.get_admin_transaction_summary(
             status=status,
             category=category,
+            categories=categories,
             transaction_type=transaction_type,
             reference=reference,
             user_id=user_id,
@@ -152,6 +164,7 @@ class TransactionAdministrationService:
             end_date=end_date,
             search=search,
             provider=provider,
+            method=method,
         )
 
         return {
@@ -643,8 +656,10 @@ class TransactionAdministrationService:
             "created_at": transaction.created_at.isoformat() if transaction.created_at else None,
             "updated_at": transaction.updated_at.isoformat() if transaction.updated_at else None,
         }
+        safe_metadata = self._safe_transaction_metadata(transaction.metadata_payload)
+        data["payment_method"] = safe_metadata.get("payment_method") or safe_metadata.get("channel")
         if include_metadata:
-            data["metadata"] = self._safe_transaction_metadata(transaction.metadata_payload)
+            data["metadata"] = safe_metadata
         return data
 
     @staticmethod
@@ -665,6 +680,8 @@ class TransactionAdministrationService:
             "channel",
             "payment_method",
             "payment_type",
+            "account_number_last4",
+            "recipient_wallet_id",
             "service",
             "network",
             "plan",
@@ -676,13 +693,19 @@ class TransactionAdministrationService:
             "customer_type",
         }
         parsed = self._parse_json(raw_value)
-        return {
-            key: value
-            for key, value in parsed.items()
-            if key.lower() in safe_keys
-            and isinstance(value, (str, int, float, bool))
-            and (not isinstance(value, str) or len(value) <= 200)
-        }
+        safe_metadata: dict[str, Any] = {}
+        for key, value in parsed.items():
+            normalized_key = key.lower()
+            if normalized_key not in safe_keys or not isinstance(value, (str, int, float, bool)):
+                continue
+            if isinstance(value, str) and len(value) > 200:
+                continue
+            if normalized_key == "account_number_last4" and (
+                not isinstance(value, str) or len(value) != 4 or not value.isdigit()
+            ):
+                continue
+            safe_metadata[key] = value
+        return safe_metadata
 
     @staticmethod
     def _serialize_ledger_entry(entry: Ledger) -> dict[str, Any]:

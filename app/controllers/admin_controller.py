@@ -733,6 +733,53 @@ class AdminController:
             success_message="Transactions retrieved successfully.",
         )
 
+    async def list_payments(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        payment_category: str | None = None,
+        status: str | None = None,
+        method: str | None = None,
+        search: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        descending: bool = True,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=None, request=request)
+        return await self._execute(
+            action="list_payments",
+            handler=self._resolve_handler("list_payments"),
+            payload={
+                "admin_id": target_admin_id,
+                "page": page,
+                "page_size": page_size,
+                "payment_category": payment_category,
+                "status": status,
+                "method": method,
+                "search": search,
+                "start_date": start_date,
+                "end_date": end_date,
+                "descending": descending,
+            },
+            success_message="Payments retrieved successfully.",
+        )
+
+    async def get_payment_details(
+        self,
+        transaction_id: UUID,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=None, request=request)
+        return await self._execute(
+            action="get_payment_details",
+            handler=self._resolve_handler("get_payment_details"),
+            payload={"admin_id": target_admin_id, "transaction_id": transaction_id},
+            success_message="Payment details retrieved successfully.",
+        )
+
     async def list_user_transactions(
         self,
         user_id: UUID,

@@ -18,6 +18,7 @@ from app.models.wallet import Wallet
 from app.repositories.ledger_repository import LedgerRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.services.admin.transactions import TransactionAdministrationService
+from app.services.admin.payments import PaymentAdministrationService
 from app.services.admin.wallet import WalletAdministrationService
 from app.utils.exceptions import AuthorizationException, ValidationException
 
@@ -73,6 +74,7 @@ async def transaction_services():
                 "channel": "bank_transfer",
                 "api_token": "must-not-be-returned",
                 "account_number": "1234567890",
+                "account_number_last4": "7890",
             }),
             created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
@@ -93,6 +95,22 @@ async def transaction_services():
             created_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
         )
         session.add(newer_transaction)
+        session.add(
+            Transaction(
+                id=UUID("55555555-5555-4555-8555-555555555555"),
+                reference="CPAY-READ-003",
+                user_id=user.id,
+                wallet_id=wallet.id,
+                transaction_type="wallet_transfer_internal",
+                category="transfer",
+                amount=Decimal("30.00"),
+                currency="NGN",
+                charges=Decimal("0.00"),
+                total_amount=Decimal("30.00"),
+                status="pending",
+                created_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            )
+        )
         await session.flush()
         session.add(
             Ledger(
@@ -202,11 +220,78 @@ async def test_transaction_details_allowlist_metadata_and_related_ledger(transac
     )
     data = result["data"]
 
-    assert data["metadata"] == {"channel": "bank_transfer"}
+    assert data["metadata"] == {
+        "channel": "bank_transfer",
+        "account_number_last4": "7890",
+    }
     assert "api_token" not in data["metadata"]
     assert "account_number" not in data["metadata"]
     assert len(data["ledger_entries"]) == 1
     assert data["ledger_entries"][0]["source"] == "ledger"
+
+
+@pytest.mark.asyncio
+async def test_payment_list_uses_persisted_records_and_category_method_search(transaction_services):
+    transaction_service, _, transaction = transaction_services
+    payment_service = PaymentAdministrationService(transaction_service=transaction_service)
+
+    second_page = await payment_service.list_payments(
+        admin_id=ADMIN_ID,
+        page=2,
+        page_size=1,
+    )
+    assert second_page["data"]["total"] == 2
+    assert second_page["data"]["total_pages"] == 2
+    assert second_page["data"]["items"][0]["reference"] == "CPAY-READ-001"
+
+    result = await payment_service.list_payments(
+        admin_id=ADMIN_ID,
+        page=1,
+        page_size=20,
+        payment_category="wallet_funding",
+        method="bank_transfer",
+        search="maria",
+    )
+    data = result["data"]
+
+    assert data["total"] == 1
+    assert len(data["items"]) == 1
+    assert data["items"][0]["id"] == str(transaction.id)
+    assert data["items"][0]["payment_type"] == "wallet_funding"
+    assert data["items"][0]["method"] == "bank_transfer"
+    assert data["summary"] == {"total": 1, "successful": 1, "pending": 0, "failed": 0}
+
+
+@pytest.mark.asyncio
+async def test_payment_details_include_real_ledger_and_only_masked_bank_data(transaction_services):
+    transaction_service, _, transaction = transaction_services
+    payment_service = PaymentAdministrationService(transaction_service=transaction_service)
+
+    result = await payment_service.get_payment_details(
+        admin_id=ADMIN_ID,
+        transaction_id=transaction.id,
+    )
+    data = result["data"]
+
+    assert data["payment_type"] == "wallet_funding"
+    assert data["method"] == "bank_transfer"
+    assert data["metadata"]["account_number_last4"] == "7890"
+    assert "account_number" not in data["metadata"]
+    assert "api_token" not in data["metadata"]
+    assert len(data["ledger_entries"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_payment_listing_requires_an_active_admin(transaction_services):
+    transaction_service, _, _ = transaction_services
+    payment_service = PaymentAdministrationService(transaction_service=transaction_service)
+
+    with pytest.raises(AuthorizationException):
+        await payment_service.list_payments(
+            admin_id=UUID("99999999-9999-4999-8999-999999999999"),
+            page=1,
+            page_size=20,
+        )
 
 
 @pytest.mark.asyncio

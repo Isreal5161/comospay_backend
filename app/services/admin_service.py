@@ -191,8 +191,14 @@ class AdminService:
     async def list_transactions(self, **payload: Any) -> dict[str, Any]:
         return await self.transaction_service.list_transactions(**payload)
 
+    async def list_payments(self, **payload: Any) -> dict[str, Any]:
+        return await self.payment_service.list_payments(**payload)
+
     async def get_transaction_details(self, *, transaction_id, **payload: Any) -> dict[str, Any]:
         return await self.transaction_service.get_transaction_details(transaction_id=transaction_id, **payload)
+
+    async def get_payment_details(self, *, transaction_id, **payload: Any) -> dict[str, Any]:
+        return await self.payment_service.get_payment_details(transaction_id=transaction_id, **payload)
 
     async def get_user_transaction_details(
         self,

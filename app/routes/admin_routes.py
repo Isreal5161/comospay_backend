@@ -203,6 +203,25 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
 
         stage = "admin_factory_admin_services_created"
         logger.info("admin_factory_admin_services_created")
+        transaction_administration_service = TransactionAdministrationService(
+            logger=logger,
+            transaction_repository=transaction_repository,
+            ledger_repository=ledger_repository,
+            admin_repository=admin_repository,
+            audit_repository=audit_repository,
+            notification_service=notification_service,
+            wallet_funding_service=wallet_service.funding_service,
+            wallet_transfer_service=wallet_service.transfer_service,
+            wallet_withdrawal_service=wallet_withdrawal_service,
+            airtime_service=airtime_service,
+            data_service=data_service,
+            electricity_service=electricity_service,
+            tv_service=tv_service,
+            education_service=education_service,
+            payment_service=payment_service,
+            transaction_owner_resolver=transaction_owner_resolver,
+            session=session,
+        )
         admin_service = AdminService(
             admin_repository=admin_repository,
             dashboard_service=DashboardService(
@@ -246,26 +265,13 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
                 wallet_reconciliation_service=wallet_reconciliation_service,
                 session=session,
             ),
-            transaction_service=TransactionAdministrationService(
+            transaction_service=transaction_administration_service,
+            payment_service=PaymentAdministrationService(
+                transaction_service=transaction_administration_service,
+                wallet_repository=wallet_repository,
+                user_repository=user_repository,
                 logger=logger,
-                transaction_repository=transaction_repository,
-                ledger_repository=ledger_repository,
-                admin_repository=admin_repository,
-                audit_repository=audit_repository,
-                notification_service=notification_service,
-                wallet_funding_service=wallet_service.funding_service,
-                wallet_transfer_service=wallet_service.transfer_service,
-                wallet_withdrawal_service=wallet_withdrawal_service,
-                airtime_service=airtime_service,
-                data_service=data_service,
-                electricity_service=electricity_service,
-                tv_service=tv_service,
-                education_service=education_service,
-                payment_service=payment_service,
-                transaction_owner_resolver=transaction_owner_resolver,
-                session=session,
             ),
-            payment_service=PaymentAdministrationService(logger=logger),
             finance_service=FinanceService(
                 logger=logger,
                 ledger_service=ledger_service,
@@ -754,6 +760,44 @@ async def list_transactions(
         descending=descending,
         request=request,
     )
+
+
+@router.get("/payments", status_code=status.HTTP_200_OK)
+async def list_payments(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    payment_category: str | None = Query(default=None, max_length=50),
+    status_filter: str | None = Query(default=None, alias="status", max_length=50),
+    method: str | None = Query(default=None, max_length=100),
+    search: str | None = Query(default=None, max_length=255),
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    descending: bool = True,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.list_payments(
+        page=page,
+        page_size=page_size,
+        payment_category=payment_category,
+        status=status_filter,
+        method=method,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+        descending=descending,
+        request=request,
+    )
+
+
+@router.get("/payments/{transaction_id}", status_code=status.HTTP_200_OK)
+async def get_payment_details(
+    transaction_id: UUID,
+    request: Request,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_payment_details(transaction_id, request=request)
+
 
 @router.get("/users/{user_id}/transactions", status_code=status.HTTP_200_OK)
 async def list_user_transactions(

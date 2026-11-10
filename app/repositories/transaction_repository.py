@@ -290,6 +290,7 @@ class TransactionRepository:
         page_size: int = 20,
         status: str | None = None,
         category: str | None = None,
+        categories: list[str] | tuple[str, ...] | None = None,
         transaction_type: str | None = None,
         reference: str | None = None,
         user_id: str | None = None,
@@ -298,6 +299,7 @@ class TransactionRepository:
         end_date: datetime | None = None,
         search: str | None = None,
         provider: str | None = None,
+        method: str | None = None,
         order_by: str = "created_at",
         descending: bool = True,
         include_user: bool = False,
@@ -313,6 +315,7 @@ class TransactionRepository:
         filters = self._admin_transaction_filters(
             status=status,
             category=category,
+            categories=categories,
             transaction_type=transaction_type,
             reference=reference,
             user_id=user_id,
@@ -321,6 +324,7 @@ class TransactionRepository:
             end_date=end_date,
             search=search,
             provider=provider,
+            method=method,
         )
         query = select(Transaction).join(User, User.id == Transaction.user_id)
         if include_user:
@@ -382,6 +386,7 @@ class TransactionRepository:
         *,
         status: str | None = None,
         category: str | None = None,
+        categories: list[str] | tuple[str, ...] | None = None,
         transaction_type: str | None = None,
         reference: str | None = None,
         user_id: str | None = None,
@@ -390,12 +395,15 @@ class TransactionRepository:
         end_date: datetime | None = None,
         search: str | None = None,
         provider: str | None = None,
+        method: str | None = None,
     ) -> list[Any]:
         filters: list[Any] = []
         if status:
             filters.append(func.lower(Transaction.status) == status.lower())
         if category:
             filters.append(func.lower(Transaction.category) == category.lower())
+        if categories:
+            filters.append(func.lower(Transaction.category).in_([value.lower() for value in categories]))
         if transaction_type:
             filters.append(func.lower(Transaction.transaction_type) == transaction_type.lower())
         if reference:
@@ -410,6 +418,15 @@ class TransactionRepository:
             filters.append(Transaction.created_at <= end_date)
         if provider:
             filters.append(func.lower(Transaction.provider_name) == provider.lower())
+        if method:
+            escaped_method = method.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            method_pattern = f'%{escaped_method}%'
+            filters.append(
+                or_(
+                    func.lower(Transaction.provider_name) == method.lower(),
+                    Transaction.metadata_payload.ilike(method_pattern, escape="\\"),
+                )
+            )
         if search and search.strip():
             search_term = search.strip()
             escaped_search = search_term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
