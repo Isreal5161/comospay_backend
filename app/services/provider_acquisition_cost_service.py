@@ -44,10 +44,13 @@ class ProviderCostSnapshotService:
         provider_identifier = str(transaction.provider_name or "").strip() or None
         provider = await self._resolve_provider(provider_identifier, service_type)
         timestamp = datetime.now(timezone.utc)
+        transaction_time = transaction.created_at
         configuration = None
         reason = None
         if provider is None:
             reason = "The successful transaction has no unambiguous matching provider record."
+        elif transaction_time is None or transaction_time.tzinfo is None:
+            reason = "The transaction initiation timestamp is unavailable or lacks a timezone; no historical cost estimate was assigned."
         else:
             try:
                 configuration = await self.repository.find_matching_configuration(
@@ -56,12 +59,12 @@ class ProviderCostSnapshotService:
                     network_identifier=network_identifier,
                     product_identifier=product_identifier,
                     currency=str(transaction.currency).strip().upper(),
-                    at=timestamp,
+                    at=transaction_time.astimezone(timezone.utc),
                 )
             except ValueError as exc:
                 reason = str(exc)
             if configuration is None:
-                reason = reason or "No effective admin-configured acquisition cost matches the fulfilling provider and transaction product."
+                reason = reason or "No historically recorded admin-configured acquisition cost was available at transaction initiation; no historical estimate was assigned."
 
         cost_amount: Decimal | None = None
         gross_margin: Decimal | None = None
@@ -180,7 +183,15 @@ class ProviderAcquisitionCostAdministrationService:
                 product_identifier=values["product_identifier"],
                 currency=values["currency"],
             )
-            if await self.repository.overlapping_configuration(**values):
+            if await self.repository.overlapping_configuration(
+                provider_id=values["provider_id"],
+                service_type=values["service_type"],
+                network_identifier=values["network_identifier"],
+                product_identifier=values["product_identifier"],
+                currency=values["currency"],
+                effective_from=values["effective_from"],
+                effective_until=values["effective_until"],
+            ):
                 raise ValueError("An active provider-cost configuration overlaps this provider, service, currency, and product scope.")
             now = datetime.now(timezone.utc)
             configuration = ProviderAcquisitionCost(
@@ -232,7 +243,16 @@ class ProviderAcquisitionCostAdministrationService:
                 product_identifier=values["product_identifier"],
                 currency=values["currency"],
             )
-            if await self.repository.overlapping_configuration(**values, exclude_id=current.id):
+            if await self.repository.overlapping_configuration(
+                provider_id=values["provider_id"],
+                service_type=values["service_type"],
+                network_identifier=values["network_identifier"],
+                product_identifier=values["product_identifier"],
+                currency=values["currency"],
+                effective_from=values["effective_from"],
+                effective_until=values["effective_until"],
+                exclude_id=current.id,
+            ):
                 raise ValueError("The new version overlaps another active configuration for the same scope.")
             current_end = self._normalize_datetime(current.effective_until) if current.effective_until else None
             if current_end is None or effective_from < current_end:
@@ -259,9 +279,18 @@ class ProviderAcquisitionCostAdministrationService:
             configuration = await self.repository.get_configuration(config_id, lock=True)
             if configuration is None:
                 raise ValueError("Provider acquisition-cost configuration was not found.")
+            now = datetime.now(timezone.utc)
+            effective_from = self._normalize_datetime(configuration.effective_from)
+            effective_until = (
+                self._normalize_datetime(configuration.effective_until)
+                if configuration.effective_until
+                else None
+            )
+            if now > effective_from and (effective_until is None or now < effective_until):
+                configuration.effective_until = now
             configuration.is_active = False
             configuration.updated_by = admin_id
-            configuration.updated_at = datetime.now(timezone.utc)
+            configuration.updated_at = now
             await self.repository.save_configuration(configuration)
             provider = await self.repository.get_provider(configuration.provider_id)
         if provider is None:

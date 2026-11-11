@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -65,6 +65,7 @@ def transaction(*, status: str = "succeeded", provider_name: str | None = "aidap
         provider_transaction_id="provider-tx-001",
         currency="NGN",
         amount=Decimal("100.00"),
+        created_at=datetime.now(timezone.utc) - timedelta(days=1),
     )
 
 
@@ -170,7 +171,8 @@ async def test_pending_transaction_does_not_create_cost_snapshot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_final_provider_is_recorded_as_unavailable() -> None:
+@pytest.mark.parametrize("provider_name", [None, "unresolved-failover-provider"])
+async def test_missing_or_unresolved_final_provider_is_recorded_as_unavailable(provider_name: str | None) -> None:
     repository = FakeProviderCostRepository(
         configuration=SimpleNamespace(
             id=uuid4(),
@@ -180,7 +182,7 @@ async def test_missing_final_provider_is_recorded_as_unavailable() -> None:
     )
 
     snapshot = await ProviderCostSnapshotService(repository).capture_successful_transaction(
-        transaction(provider_name=None)
+        transaction(provider_name=provider_name)
     )
 
     assert snapshot is repository.created[0]
@@ -230,6 +232,187 @@ async def cost_database():
         await engine.dispose()
 
 
+async def _create_delayed_reconciliation_case(
+    session,
+    *,
+    transaction_time: datetime,
+    configurations: list[tuple[Decimal, datetime, datetime | None, bool]],
+) -> tuple[Transaction, Provider, list[ProviderAcquisitionCost]]:
+    admin = Admin(email="historical-cost-admin@example.test", role="admin", status="active")
+    user = User(email="historical-cost-user@example.test", status="active")
+    session.add_all([admin, user])
+    await session.flush()
+    wallet = Wallet(user_id=user.id, currency="NGN")
+    provider = Provider(
+        name="AidaPay",
+        code="aidapay",
+        category="airtime",
+        status="active",
+        is_active=True,
+    )
+    session.add_all([wallet, provider])
+    await session.flush()
+
+    transaction_record = Transaction(
+        reference=f"HISTORICAL-COST-{uuid4()}",
+        user_id=user.id,
+        wallet_id=wallet.id,
+        transaction_type="airtime_purchase",
+        category="airtime",
+        amount=Decimal("100.00"),
+        currency="NGN",
+        charges=Decimal("0.00"),
+        total_amount=Decimal("100.00"),
+        status="completed",
+        provider_name="AidaPay",
+        metadata_payload=json.dumps({"network": "MTN"}),
+        created_at=transaction_time,
+    )
+    session.add(transaction_record)
+
+    rules = [
+        ProviderAcquisitionCost(
+            provider_id=provider.id,
+            service_type="airtime",
+            network_identifier="MTN",
+            product_identifier=None,
+            currency="NGN",
+            cost_method="fixed_amount",
+            cost_value=cost_value,
+            is_active=is_active,
+            effective_from=effective_from,
+            effective_until=effective_until,
+            evidence_note="Test admin configuration; not provider debit evidence.",
+            created_by=admin.id,
+            updated_by=admin.id,
+            created_at=effective_from,
+            updated_at=effective_from,
+        )
+        for cost_value, effective_from, effective_until, is_active in configurations
+    ]
+    session.add_all(rules)
+    await session.flush()
+    return transaction_record, provider, rules
+
+
+@pytest.mark.asyncio
+async def test_delayed_reconciliation_uses_historical_effective_cost_and_preserves_snapshot(
+    cost_database,
+    monkeypatch,
+) -> None:
+    monday = datetime(2026, 1, 5, 12, tzinfo=timezone.utc)
+    tuesday = datetime(2026, 1, 6, 12, tzinfo=timezone.utc)
+    wednesday = datetime(2026, 1, 7, 12, tzinfo=timezone.utc)
+
+    class FrozenDateTime(datetime):
+        current = tuesday
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current if tz else cls.current.replace(tzinfo=None)
+
+    monkeypatch.setattr("app.services.provider_acquisition_cost_service.datetime", FrozenDateTime)
+    async with cost_database() as session:
+        transaction_record, _, rules = await _create_delayed_reconciliation_case(
+            session,
+            transaction_time=monday,
+            configurations=[
+                (Decimal("90.00"), datetime(2026, 1, 1, tzinfo=timezone.utc), None, True),
+            ],
+        )
+        await session.commit()
+        administration_service = ProviderAcquisitionCostAdministrationService(
+            session,
+            ProviderAcquisitionCostRepository(session),
+        )
+        FrozenDateTime.current = tuesday
+        revised = await administration_service.update_configuration(
+            rules[0].id,
+            admin_id=rules[0].updated_by,
+            payload={"effective_from": tuesday, "cost_value": Decimal("95.00")},
+        )
+        revised_rule = await session.get(ProviderAcquisitionCost, UUID(revised["id"]))
+        assert revised_rule is not None
+        assert rules[0].effective_until.replace(tzinfo=timezone.utc) == tuesday
+        assert rules[0].is_active is False
+
+        service = ProviderCostSnapshotService(ProviderAcquisitionCostRepository(session))
+
+        FrozenDateTime.current = wednesday
+        snapshot = await service.capture_successful_transaction(transaction_record)
+
+        assert snapshot is not None
+        assert snapshot.configuration_id == rules[0].id
+        assert snapshot.cost_amount == Decimal("90.00")
+        assert snapshot.source_class == "ADMIN_CONFIGURED"
+        assert snapshot.cost_snapshot_at == wednesday
+
+        later_rule = ProviderAcquisitionCost(
+            provider_id=revised_rule.provider_id,
+            service_type="airtime",
+            network_identifier="MTN",
+            product_identifier=None,
+            currency="NGN",
+            cost_method="fixed_amount",
+            cost_value=Decimal("100.00"),
+            is_active=True,
+            effective_from=datetime(2026, 1, 8, tzinfo=timezone.utc),
+            effective_until=None,
+            evidence_note="Subsequent rule change for regression coverage.",
+            created_by=revised_rule.created_by,
+            updated_by=revised_rule.updated_by,
+        )
+        session.add(later_rule)
+        await session.flush()
+
+        repeated = await service.capture_successful_transaction(transaction_record)
+
+        assert repeated.id == snapshot.id
+        assert repeated.configuration_id == rules[0].id
+        assert repeated.cost_amount == Decimal("90.00")
+        assert repeated.cost_snapshot_at == snapshot.cost_snapshot_at
+
+
+@pytest.mark.asyncio
+async def test_delayed_reconciliation_without_historical_rule_is_unavailable_not_repriced(
+    cost_database,
+    monkeypatch,
+) -> None:
+    monday = datetime(2026, 1, 5, 12, tzinfo=timezone.utc)
+    tuesday = datetime(2026, 1, 6, 12, tzinfo=timezone.utc)
+    wednesday = datetime(2026, 1, 7, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "app.services.provider_acquisition_cost_service.datetime",
+        type(
+            "FrozenDateTime",
+            (datetime,),
+            {"now": classmethod(lambda cls, tz=None: wednesday)},
+        ),
+    )
+    async with cost_database() as session:
+        transaction_record, _, _ = await _create_delayed_reconciliation_case(
+            session,
+            transaction_time=monday,
+            configurations=[
+                (Decimal("95.00"), monday - timedelta(days=2), None, True)
+            ],
+        )
+        current_rule = await session.scalar(select(ProviderAcquisitionCost))
+        assert current_rule is not None
+        current_rule.created_at = tuesday
+        await session.flush()
+        service = ProviderCostSnapshotService(ProviderAcquisitionCostRepository(session))
+        snapshot = await service.capture_successful_transaction(transaction_record)
+
+        assert snapshot is not None
+        assert snapshot.source_class == "UNAVAILABLE"
+        assert snapshot.cost_amount is None
+        assert snapshot.gross_margin is None
+        assert snapshot.configuration_id is None
+        assert "No historically recorded admin-configured acquisition cost was available at transaction initiation" in snapshot.reason
+        assert snapshot.cost_snapshot_at == wednesday
+
+
 @pytest.mark.asyncio
 async def test_database_snapshot_is_persisted_once_and_remains_unchanged_after_rule_edit(cost_database) -> None:
     async with cost_database() as session:
@@ -247,6 +430,7 @@ async def test_database_snapshot_is_persisted_once_and_remains_unchanged_after_r
         )
         session.add_all([wallet, provider])
         await session.flush()
+        transaction_created_at = datetime.now(timezone.utc)
         transaction_record = Transaction(
             reference="COST-SNAPSHOT-001",
             user_id=user.id,
@@ -262,6 +446,7 @@ async def test_database_snapshot_is_persisted_once_and_remains_unchanged_after_r
             provider_reference="provider-ref-001",
             provider_transaction_id="provider-tx-001",
             metadata_payload=json.dumps({"network": "MTN"}),
+            created_at=transaction_created_at,
         )
         session.add(transaction_record)
         configuration = ProviderAcquisitionCost(
@@ -278,6 +463,8 @@ async def test_database_snapshot_is_persisted_once_and_remains_unchanged_after_r
             evidence_note="Test admin configuration; not provider debit evidence.",
             created_by=admin.id,
             updated_by=admin.id,
+            created_at=transaction_created_at - timedelta(days=2),
+            updated_at=transaction_created_at - timedelta(days=2),
         )
         session.add(configuration)
         await session.flush()

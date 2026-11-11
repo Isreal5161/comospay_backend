@@ -196,7 +196,11 @@ class ProviderAcquisitionCostRepository:
             ProviderAcquisitionCost.provider_id == provider_id,
             ProviderAcquisitionCost.service_type == service_type,
             ProviderAcquisitionCost.currency == currency,
-            ProviderAcquisitionCost.is_active.is_(True),
+            or_(
+                ProviderAcquisitionCost.is_active.is_(True),
+                ProviderAcquisitionCost.effective_until.is_not(None),
+            ),
+            ProviderAcquisitionCost.created_at <= at,
             ProviderAcquisitionCost.effective_from <= at,
             or_(ProviderAcquisitionCost.effective_until.is_(None), ProviderAcquisitionCost.effective_until > at),
             or_(ProviderAcquisitionCost.network_identifier.is_(None), ProviderAcquisitionCost.network_identifier == network_identifier),
@@ -219,7 +223,7 @@ class ProviderAcquisitionCostRepository:
         )
         matches = list(result.scalars().all())
         if len(matches) > 1 and self._specificity(matches[0]) == self._specificity(matches[1]):
-            raise ValueError("Multiple equally specific active provider-cost configurations match this transaction.")
+            raise ValueError("Multiple equally specific provider-cost configurations match this transaction time.")
         return matches[0] if matches else None
 
     async def create_snapshot(self, snapshot: ProviderCostSnapshot) -> ProviderCostSnapshot:
