@@ -78,11 +78,7 @@ class KYCService:
                 await self.session.rollback()
             raise
 
-        return {
-            "success": True,
-            "data": self._serialize_kyc(updated),
-            "meta": {"source": "admin.kyc", "action": normalized_action},
-        }
+        return self._serialize_kyc(updated)
 
     async def get_user_kyc(self, *, user_id: UUID, page: int = 1, page_size: int = 20, **payload: Any) -> dict[str, Any]:
         await self._require_authorized_admin(payload)
@@ -101,6 +97,48 @@ class KYCService:
         )
         return {
             "items": [self._serialize_kyc_profile(record) for record in records],
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size,
+        }
+
+    async def list_kyc(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        status: str | None = None,
+        document_type: str | None = None,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        await self._require_authorized_admin(payload)
+        if self.kyc_repository is None:
+            raise ValidationException(detail="KYC administration dependencies are unavailable.", error_code="ADMIN_KYC_UNAVAILABLE")
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise ValidationException(detail="Invalid KYC pagination.", error_code="INVALID_PAGINATION")
+
+        records, total = await self.kyc_repository.get_admin_kyc(
+            page=page,
+            page_size=page_size,
+            search=search,
+            status=status,
+            document_type=document_type,
+        )
+        items = []
+        for record, user_fields in records:
+            item = self._serialize_kyc_profile(record)
+            item["updated_at"] = record.updated_at.isoformat() if record.updated_at else None
+            item.update(
+                {
+                    "user_id": str(record.user_id),
+                    **user_fields,
+                }
+            )
+            items.append(item)
+        return {
+            "items": items,
             "page": page,
             "page_size": page_size,
             "total": total,

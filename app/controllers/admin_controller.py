@@ -161,6 +161,7 @@ class AdminController:
             status_code=status.HTTP_200_OK,
             response_model=AdminUserManagementResponse,
         )(self.manage_user)
+        self.router.get("/kyc", status_code=status.HTTP_200_OK)(self.list_kyc)
         self.router.post("/users/{user_id}/kyc/{kyc_id}/review", status_code=status.HTTP_200_OK)(self.review_kyc)
         self.router.post("/wallets/adjust", status_code=status.HTTP_200_OK)(self.adjust_wallet)
         self.router.get("/wallets", status_code=status.HTTP_200_OK)(self.list_wallets)
@@ -340,6 +341,32 @@ class AdminController:
                 "review_notes": payload.review_notes,
             },
             success_message="KYC review completed successfully.",
+        )
+
+    async def list_kyc(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        status: str | None = None,
+        document_type: str | None = None,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="list_kyc",
+            handler=self._resolve_handler("list_kyc"),
+            payload={
+                "admin_id": target_admin_id,
+                "page": page,
+                "page_size": page_size,
+                "search": search,
+                "status": status,
+                "document_type": document_type,
+            },
+            success_message="KYC records retrieved successfully.",
         )
 
     async def get_user_kyc(

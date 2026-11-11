@@ -499,6 +499,26 @@ async def manage_user(
     return await controller.manage_user(user_id, payload, request=request)
 
 
+@router.get("/kyc", status_code=status.HTTP_200_OK)
+async def list_admin_kyc(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=255),
+    status: str | None = Query(default=None, max_length=50),
+    document_type: str | None = Query(default=None, max_length=100),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.list_kyc(
+        page=page,
+        page_size=page_size,
+        search=search,
+        status=status,
+        document_type=document_type,
+        request=request,
+    )
+
+
 @router.get("/users/{user_id}/kyc", status_code=status.HTTP_200_OK)
 async def get_user_kyc(
     user_id: UUID,

@@ -129,6 +129,9 @@ class AdminService:
     async def review_kyc(self, *, user_id, kyc_id, action: str, **payload: Any) -> dict[str, Any]:
         return await self.kyc_service.review_kyc(user_id=user_id, kyc_id=kyc_id, action=action, **payload)
 
+    async def list_kyc(self, **payload: Any) -> dict[str, Any]:
+        return await self.kyc_service.list_kyc(**payload)
+
     async def get_user_kyc(self, *, user_id, **payload: Any) -> dict[str, Any]:
         return await self.kyc_service.get_user_kyc(user_id=user_id, **payload)
 

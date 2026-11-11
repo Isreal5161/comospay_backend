@@ -3,10 +3,11 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import String, cast, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.kyc import KYC
+from app.models.user import User
 
 
 class KYCRepository:
@@ -60,7 +61,7 @@ class KYCRepository:
             order_column = order_column.desc()
 
         result = await self.session.execute(
-            query.order_by(order_column).offset((page - 1) * page_size).limit(page_size)
+            query.order_by(order_column, KYC.id.desc()).offset((page - 1) * page_size).limit(page_size)
         )
         kycs = list(result.scalars().all())
         return kycs, total
@@ -81,6 +82,66 @@ class KYCRepository:
         )
         kycs = list(result.scalars().all())
         return kycs, total
+
+    async def get_admin_kyc(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        status: str | None = None,
+        document_type: str | None = None,
+    ) -> tuple[list[tuple[KYC, dict[str, str | None]]], int]:
+        """Return globally paginated KYC rows with only safe, joined user fields."""
+        filters = []
+        if status and status.strip():
+            filters.append(KYC.verification_status == status.strip())
+        if document_type and document_type.strip():
+            filters.append(KYC.document_type == document_type.strip())
+        if search and search.strip():
+            search_term = search.strip()
+            pattern = f"%{search_term}%"
+            filters.append(
+                or_(
+                    cast(KYC.id, String).ilike(pattern),
+                    User.first_name.ilike(pattern),
+                    User.last_name.ilike(pattern),
+                    User.email.ilike(pattern),
+                    User.phone.ilike(pattern),
+                )
+            )
+
+        count_result = await self.session.execute(
+            select(func.count(KYC.id)).select_from(KYC).outerjoin(User, User.id == KYC.user_id).where(*filters)
+        )
+        total = int(count_result.scalar_one() or 0)
+        result = await self.session.execute(
+            select(
+                KYC,
+                User.first_name.label("user_first_name"),
+                User.last_name.label("user_last_name"),
+                User.email.label("user_email"),
+                User.phone.label("user_phone"),
+            )
+            .outerjoin(User, User.id == KYC.user_id)
+            .where(*filters)
+            .order_by(KYC.created_at.desc(), KYC.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        records = [
+            (
+                row[0],
+                {
+                    "user_first_name": row.user_first_name,
+                    "user_last_name": row.user_last_name,
+                    "user_email": row.user_email,
+                    "user_phone": row.user_phone,
+                },
+            )
+            for row in result.all()
+        ]
+        return records, total
 
     async def update_kyc(self, kyc: KYC, **fields: Any) -> KYC:
         """Update editable KYC fields in the database."""
