@@ -189,6 +189,7 @@ async def test_tv_purchase_service_executes_provider_manager_subscribe_tv() -> N
         transaction_pin="1234",
         package_code="DTV-1",
         service_type="COMPACT",
+        provider_name="requested-provider",
     )
 
     assert provider_manager.calls[0]["operation"] == "subscribe_tv"
@@ -203,6 +204,7 @@ async def test_tv_purchase_service_executes_provider_manager_subscribe_tv() -> N
     assert result["provider_transaction_id"] == "tv-tx-001"
 
     created = transaction_repository.transactions[result["reference"]]
+    assert created.provider_name == "aidapay"
     metadata = json.loads(created.metadata_payload)
     assert metadata["provider"] == "DSTV"
     assert metadata["smart_card_number"] == "1234567890"

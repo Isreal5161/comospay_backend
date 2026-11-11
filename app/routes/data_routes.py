@@ -20,6 +20,7 @@ from app.controllers.data_controller import (
     DataStatusRequest,
 )
 from app.repositories.ledger_repository import LedgerRepository
+from app.repositories.provider_acquisition_cost_repository import ProviderAcquisitionCostRepository
 from app.repositories.provider_repository import ProviderRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
@@ -30,6 +31,7 @@ from app.services.data.pricing import DataPricingService
 from app.services.data.purchase import DataPurchaseService
 from app.services.data.reconciliation import DataReconciliationService
 from app.services.data.validation import DataValidationService
+from app.services.provider_acquisition_cost_service import ProviderCostSnapshotService
 from app.services.data_service import DataService
 from app.services.ledger_service import LedgerService
 from app.services.provider.failover import ProviderFailoverService
@@ -83,12 +85,16 @@ async def get_data_service(session: AsyncSession = Depends(get_db)) -> DataServi
         wallet_repository=wallet_repository,
         transaction_repository=transaction_repository,
     )
+    cost_snapshot_service = ProviderCostSnapshotService(
+        ProviderAcquisitionCostRepository(session=session)
+    )
     purchase_service = DataPurchaseService(
         wallet_service=wallet_service,
         provider_service=provider_service,
         transaction_repository=transaction_repository,
         user_repository=user_repository,
         ledger_service=ledger_service,
+        cost_snapshot_service=cost_snapshot_service,
     )
     validation_service = DataValidationService(wallet_service=wallet_service)
     pricing_service = DataPricingService(
@@ -102,6 +108,7 @@ async def get_data_service(session: AsyncSession = Depends(get_db)) -> DataServi
         provider_service=provider_service,
         transaction_repository=transaction_repository,
         wallet_repository=wallet_repository,
+        cost_snapshot_service=cost_snapshot_service,
     )
 
     return DataService(

@@ -21,6 +21,7 @@ from app.controllers.electricity_controller import (
 )
 from app.routes.notification_routes import build_notification_service
 from app.repositories.ledger_repository import LedgerRepository
+from app.repositories.provider_acquisition_cost_repository import ProviderAcquisitionCostRepository
 from app.repositories.provider_repository import ProviderRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
@@ -31,6 +32,7 @@ from app.services.electricity.pricing import ElectricityPricingService
 from app.services.electricity.purchase import ElectricityPurchaseService
 from app.services.electricity.reconciliation import ElectricityReconciliationService
 from app.services.electricity.validation import ElectricityValidationService
+from app.services.provider_acquisition_cost_service import ProviderCostSnapshotService
 from app.services.electricity_service import ElectricityService
 from app.services.ledger_service import LedgerService
 from app.services.provider.failover import ProviderFailoverService
@@ -97,6 +99,9 @@ async def get_electricity_service(session: AsyncSession = Depends(get_db)) -> El
         user_repository=user_repository,
         wallet_repository=wallet_repository,
         ledger_service=ledger_service,
+        cost_snapshot_service=ProviderCostSnapshotService(
+            ProviderAcquisitionCostRepository(session=session)
+        ),
     )
     reconciliation_service = ElectricityReconciliationService(
         provider_service=provider_service,

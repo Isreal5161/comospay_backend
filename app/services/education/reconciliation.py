@@ -11,6 +11,7 @@ from app.models.provider import Provider
 from app.models.transaction import Transaction
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
+from app.services.provider_acquisition_cost_service import ProviderCostSnapshotService
 from app.services.provider_service import ProviderService
 from app.utils.exceptions import ValidationException
 
@@ -29,6 +30,7 @@ class EducationReconciliationService:
         provider_service: ProviderService,
         transaction_repository: TransactionRepository,
         settings_repository: SystemSettingsRepository,
+        cost_snapshot_service: ProviderCostSnapshotService | None = None,
         redis_client: Redis | None = None,
         logger: logging.Logger | None = None,
         batch_size: int = 100,
@@ -37,6 +39,7 @@ class EducationReconciliationService:
         self.provider_service = provider_service
         self.transaction_repository = transaction_repository
         self.settings_repository = settings_repository
+        self.cost_snapshot_service = cost_snapshot_service
         self.redis_client = redis_client
         self.logger = logger or logging.getLogger(__name__)
         self.batch_size = max(1, batch_size)
@@ -57,6 +60,8 @@ class EducationReconciliationService:
 
         self.logger.info("education_reconciliation_started", extra={"reference": reference})
         if transaction.status in {"completed", "succeeded", "settled"} and provider_operation is None:
+            if self.cost_snapshot_service is not None:
+                await self.cost_snapshot_service.capture_successful_transaction(transaction)
             return await self._build_response(transaction, matched=True)
 
         if provider_operation is None:
@@ -69,7 +74,7 @@ class EducationReconciliationService:
         )
 
         reconciliation = self._compare_status(transaction=transaction, provider_response=provider_response)
-        transaction.provider_name = provider_name or transaction.provider_name or provider_response.get("provider")
+        transaction.provider_name = provider_response.get("provider") or provider_name or transaction.provider_name
         transaction.provider_reference = provider_response.get("provider_reference") or transaction.provider_reference
         transaction.provider_transaction_id = provider_response.get("provider_transaction_id") or transaction.provider_transaction_id
         transaction.external_reference = transaction.provider_reference
@@ -95,6 +100,8 @@ class EducationReconciliationService:
             external_reference=transaction.external_reference,
             metadata_payload=transaction.metadata_payload,
         )
+        if transaction.status in {"completed", "succeeded", "settled"} and self.cost_snapshot_service is not None:
+            await self.cost_snapshot_service.capture_successful_transaction(transaction)
 
         self.logger.info(
             "education_reconciliation_completed",

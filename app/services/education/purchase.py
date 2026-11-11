@@ -10,6 +10,7 @@ from app.models.provider import Provider
 from app.models.transaction import Transaction
 from app.models.wallet import Wallet
 from app.repositories.transaction_repository import TransactionRepository
+from app.services.provider_acquisition_cost_service import ProviderCostSnapshotService
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
 from app.services.ledger_service import LedgerService
@@ -30,6 +31,7 @@ class EducationPurchaseService:
         transaction_repository: TransactionRepository,
         user_repository: UserRepository,
         wallet_repository: WalletRepository,
+        cost_snapshot_service: ProviderCostSnapshotService | None = None,
         ledger_service: LedgerService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -38,6 +40,7 @@ class EducationPurchaseService:
         self.transaction_repository = transaction_repository
         self.user_repository = user_repository
         self.wallet_repository = wallet_repository
+        self.cost_snapshot_service = cost_snapshot_service
         self.ledger_service = ledger_service
         self.logger = logger or logging.getLogger(__name__)
 
@@ -181,7 +184,10 @@ class EducationPurchaseService:
                 raise ValidationException("Purchase transaction was not found.")
 
             transaction_record.status = status
-            transaction_record.provider_name = provider_name or provider_response.get("provider", {}).get("name") or transaction_record.provider_name
+            actual_provider = provider_response.get("provider")
+            if isinstance(actual_provider, dict):
+                actual_provider = actual_provider.get("name")
+            transaction_record.provider_name = actual_provider or provider_name or transaction_record.provider_name
             transaction_record.provider_reference = provider_response.get("provider_reference") or transaction_record.provider_reference
             transaction_record.provider_transaction_id = provider_response.get("provider_transaction_id") or transaction_record.provider_transaction_id
             transaction_record.external_reference = transaction_record.provider_reference
@@ -205,6 +211,9 @@ class EducationPurchaseService:
                 external_reference=transaction_record.external_reference,
                 metadata_payload=transaction_record.metadata_payload,
             )
+
+            if status in {"succeeded", "completed", "settled"} and self.cost_snapshot_service is not None:
+                await self.cost_snapshot_service.capture_successful_transaction(transaction_record)
 
             if status in {"failed", "cancelled", "reversed"}:
                 await self._handle_provider_failure(
@@ -429,10 +438,19 @@ class EducationPurchaseService:
         if not transaction_pin or not isinstance(transaction_pin, str) or not transaction_pin.strip():
             raise ValidationException("Transaction PIN is required.")
 
+    def _validate_provider_payload(self, payload: dict[str, Any]) -> None:
+        if payload is None:
+            raise ValidationException("Provider payload is required.")
+
     def _normalize_amount(self, amount: Decimal | float | int) -> Decimal:
         if isinstance(amount, Decimal):
             return amount
         return Decimal(str(amount))
+
+    def _normalize_provider_response(self, result: Any, provider: Provider) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise ValidationException("Provider response is invalid.")
+        return {**result, "provider": {"name": provider.name}}
 
     async def _build_response(self, transaction: Transaction, include_metadata: bool = False) -> dict[str, Any]:
         response: dict[str, Any] = {

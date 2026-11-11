@@ -255,6 +255,12 @@ class AdminService:
     async def get_platform_statistics(self, **payload: Any) -> dict[str, Any]:
         return await self.finance_service.get_platform_statistics(**payload)
 
+    async def get_finance_report(self, **payload: Any) -> dict[str, Any]:
+        return await self.finance_service.get_finance_report(**payload)
+
+    async def get_finance_transaction(self, *, transaction_id: Any, **payload: Any) -> dict[str, Any]:
+        return await self.finance_service.get_finance_transaction(transaction_id=transaction_id)
+
     async def get_service_monitoring(self, **payload: Any) -> dict[str, Any]:
         return await self.monitoring_service.get_service_monitoring(**payload)
 

@@ -88,7 +88,7 @@ class GiftCardSettlementService:
             )
 
             transaction_record.status = status
-            transaction_record.provider_name = provider_name or provider_response.get("provider") or transaction_record.provider_name
+            transaction_record.provider_name = provider_response.get("provider") or provider_name or transaction_record.provider_name
             transaction_record.provider_reference = provider_response.get("provider_reference") or transaction_record.provider_reference
             transaction_record.provider_transaction_id = provider_response.get("provider_transaction_id") or transaction_record.provider_transaction_id
             transaction_record.external_reference = transaction_record.external_reference or settlement_reference_value

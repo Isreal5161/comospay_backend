@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Protocol, cast
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, status, status as http_status
 from pydantic import BaseModel, Field
 
 from app.schemas.admin_schema import (
@@ -195,6 +195,10 @@ class AdminController:
         self.router.post("/api-keys/{api_key_id}/revoke", status_code=status.HTTP_200_OK)(self.revoke_api_key)
         self.router.post("/notifications/broadcast", status_code=status.HTTP_201_CREATED)(self.broadcast_notification)
         self.router.get("/statistics", status_code=status.HTTP_200_OK)(self.get_platform_statistics)
+        self.router.get("/finance", status_code=status.HTTP_200_OK)(self.get_finance_report)
+        self.router.get("/finance/transactions/{transaction_id}", status_code=status.HTTP_200_OK)(
+            self.get_finance_transaction
+        )
         self.router.get("/monitoring", status_code=status.HTTP_200_OK)(self.get_service_monitoring)
         self.router.post("/reports", status_code=status.HTTP_200_OK)(self.generate_report)
         self.router.post("/admins", status_code=status.HTTP_201_CREATED)(self.create_admin_account)
@@ -997,6 +1001,73 @@ class AdminController:
             handler=self._resolve_handler("get_platform_statistics"),
             payload={"admin_id": target_admin_id},
             success_message="Platform statistics retrieved successfully.",
+        )
+
+    async def get_finance_report(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        category: str | None = None,
+        status: str | None = None,
+        provider: str | None = None,
+        currency: str | None = None,
+        service_type: str | None = None,
+        source_class: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        """Return date-filtered finance aggregates and a paginated activity list."""
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise HTTPException(status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid pagination parameters.")
+        if (start_date is not None and start_date.tzinfo is None) or (end_date is not None and end_date.tzinfo is None):
+            raise HTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Date filters must include a timezone.",
+            )
+        if start_date is not None:
+            start_date = start_date.astimezone(timezone.utc)
+        if end_date is not None:
+            end_date = end_date.astimezone(timezone.utc)
+        if start_date is not None and end_date is not None and end_date < start_date:
+            raise HTTPException(status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail="End date must be on or after start date.")
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="get_finance_report",
+            handler=self._resolve_handler("get_finance_report"),
+            payload={
+                "admin_id": target_admin_id,
+                "page": page,
+                "page_size": page_size,
+                "search": search,
+                "category": category,
+                "status": status,
+                "provider": provider,
+                "currency": currency,
+                "service_type": service_type,
+                "source_class": source_class,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            success_message="Finance report retrieved successfully.",
+        )
+
+    async def get_finance_transaction(
+        self,
+        transaction_id: UUID,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._resolve_effective_admin_id(admin_id=admin_id, request=request)
+        return await self._execute(
+            action="get_finance_transaction",
+            handler=self._resolve_handler("get_finance_transaction"),
+            payload={"admin_id": target_admin_id, "transaction_id": transaction_id},
+            success_message="Finance transaction retrieved successfully.",
         )
 
     async def get_service_monitoring(self, admin_id: UUID | None = None, *, request: Request) -> dict[str, Any]:

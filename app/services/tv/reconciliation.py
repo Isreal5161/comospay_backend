@@ -77,7 +77,7 @@ class TVReconciliationService:
                     "message": "A terminal transaction status cannot be changed automatically by reconciliation.",
                     "provider_status": provider_response.get("status"),
                 }
-            transaction.provider_name = provider_name or transaction.provider_name or provider_response.get("provider")
+            transaction.provider_name = provider_response.get("provider") or provider_name or transaction.provider_name
             transaction.provider_reference = provider_response.get("provider_reference") or transaction.provider_reference
             transaction.provider_transaction_id = provider_response.get("provider_transaction_id") or transaction.provider_transaction_id
             transaction.external_reference = transaction.provider_reference
@@ -108,6 +108,12 @@ class TVReconciliationService:
                 external_reference=transaction.external_reference,
                 metadata_payload=transaction.metadata_payload,
             )
+            if (
+                transaction.status in {"completed", "succeeded", "settled"}
+                and self.purchase_service is not None
+                and self.purchase_service.cost_snapshot_service is not None
+            ):
+                await self.purchase_service.cost_snapshot_service.capture_successful_transaction(transaction)
 
             self.logger.info(
                 "tv_reconciliation_completed",

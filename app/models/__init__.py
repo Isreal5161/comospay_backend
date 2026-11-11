@@ -7,6 +7,9 @@ from app.models.kyc import KYC
 from app.models.ledger import Ledger
 from app.models.notification import Notification
 from app.models.otp import OTP
+from app.models.platform_income import PlatformIncome
+from app.models.platform_income_reversal import PlatformIncomeReversal
+from app.models.provider_acquisition_cost import ProviderAcquisitionCost, ProviderCostSnapshot
 from app.models.provider import Provider
 from app.models.provider_log import ProviderLog
 from app.models.system_settings import SystemSettings
@@ -25,6 +28,10 @@ __all__ = [
     "Ledger",
     "Notification",
     "OTP",
+    "PlatformIncome",
+    "PlatformIncomeReversal",
+    "ProviderAcquisitionCost",
+    "ProviderCostSnapshot",
     "Provider",
     "ProviderLog",
     "SystemSettings",

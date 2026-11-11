@@ -191,6 +191,46 @@ async def test_data_purchase_service_executes_provider_manager_buy_data() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata_payload", "expected_variant"),
+    [
+        ('{"service_variant":"awoof"}', "awoof"),
+        ('{"service_variant":"awoof_data"}', "awoof"),
+        ('{"campaign":"standard"}', None),
+    ],
+)
+async def test_data_purchase_persists_explicit_service_variant(
+    metadata_payload: str,
+    expected_variant: str | None,
+) -> None:
+    user_id = uuid4()
+    wallet_repository = FakeWalletRepository()
+    wallet_repository.wallet.user_id = user_id
+    transaction_repository = FakeTransactionRepository()
+    service = DataPurchaseService(
+        wallet_service=FakeWalletService(wallet_repository),
+        provider_service=SimpleNamespace(),
+        provider_manager=FakeProviderManager(),
+        transaction_repository=transaction_repository,
+        user_repository=FakeUserRepository(),
+        ledger_service=FakeLedgerService(),
+    )
+
+    await service.purchase_data(
+        user_id=user_id,
+        phone_number="08030000003",
+        network="MTN",
+        bundle_code="MTN-1GB",
+        amount=Decimal("100.00"),
+        transaction_pin="1234",
+        metadata_payload=metadata_payload,
+    )
+
+    transaction = next(iter(transaction_repository.transactions.values()))
+    assert json.loads(transaction.metadata_payload).get("service_variant") == expected_variant
+
+
+@pytest.mark.asyncio
 async def test_data_purchase_service_processes_existing_transaction_with_provider_manager() -> None:
     user_id = uuid4()
     wallet_repository = FakeWalletRepository()
@@ -225,7 +265,10 @@ async def test_data_purchase_service_processes_existing_transaction_with_provide
         user_repository=FakeUserRepository(),
     )
 
-    result = await service.process_data_purchase(transaction=transaction)
+    result = await service.process_data_purchase(
+        transaction=transaction,
+        provider_name="requested-provider",
+    )
 
     assert provider_manager.calls[0]["operation"] == "buy_data"
     assert provider_manager.calls[0]["network"] == "GLO"

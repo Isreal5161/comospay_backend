@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.database import get_db
 from app.controllers.education_controller import EducationController
 from app.repositories.provider_repository import ProviderRepository
+from app.repositories.provider_acquisition_cost_repository import ProviderAcquisitionCostRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
@@ -24,6 +25,7 @@ from app.services.provider.failover import ProviderFailoverService
 from app.services.provider.health import ProviderHealthService
 from app.services.provider.selector import ProviderSelector
 from app.services.provider_service import ProviderService
+from app.services.provider_acquisition_cost_service import ProviderCostSnapshotService
 from app.services.wallet import (
     WalletFundingService,
     WalletManager,
@@ -74,17 +76,22 @@ async def get_education_service(session: AsyncSession = Depends(get_db)) -> Educ
         settings_repository=settings_repository,
     )
     result_service = EducationResultService()
+    cost_snapshot_service = ProviderCostSnapshotService(
+        ProviderAcquisitionCostRepository(session=session)
+    )
     purchase_service = EducationPurchaseService(
         wallet_service=wallet_service,
         provider_service=provider_service,
         transaction_repository=transaction_repository,
         user_repository=user_repository,
         wallet_repository=wallet_repository,
+        cost_snapshot_service=cost_snapshot_service,
     )
     reconciliation_service = EducationReconciliationService(
         provider_service=provider_service,
         transaction_repository=transaction_repository,
         settings_repository=settings_repository,
+        cost_snapshot_service=cost_snapshot_service,
     )
 
     return EducationService(

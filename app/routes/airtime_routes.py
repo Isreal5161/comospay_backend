@@ -19,10 +19,12 @@ from app.controllers.airtime_controller import (
     AirtimeValidationRequest,
 )
 from app.repositories.provider_repository import ProviderRepository
+from app.repositories.provider_acquisition_cost_repository import ProviderAcquisitionCostRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.wallet_repository import WalletRepository
 from app.services.airtime.purchase import AirtimePurchaseService
+from app.services.provider_acquisition_cost_service import ProviderCostSnapshotService
 from app.services.airtime.reconciliation import AirtimeReconciliationService
 from app.services.airtime.validation import AirtimeValidationService
 from app.services.airtime_service import AirtimeService
@@ -69,18 +71,23 @@ async def get_airtime_service(session: AsyncSession = Depends(get_db)) -> Airtim
         wallet_repository=wallet_repository,
         transaction_repository=transaction_repository,
     )
+    cost_snapshot_service = ProviderCostSnapshotService(
+        ProviderAcquisitionCostRepository(session=session)
+    )
     purchase_service = AirtimePurchaseService(
         wallet_service=wallet_service,
         provider_service=provider_service,
         transaction_repository=transaction_repository,
         user_repository=user_repository,
         wallet_repository=wallet_repository,
+        cost_snapshot_service=cost_snapshot_service,
     )
     validation_service = AirtimeValidationService(wallet_service=wallet_service)
     reconciliation_service = AirtimeReconciliationService(
         provider_service=provider_service,
         transaction_repository=transaction_repository,
         wallet_repository=wallet_repository,
+        cost_snapshot_service=cost_snapshot_service,
     )
 
     return AirtimeService(

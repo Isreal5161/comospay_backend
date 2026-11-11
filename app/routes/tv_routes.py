@@ -22,6 +22,7 @@ from app.controllers.tv_controller import (
     TVValidationRequest,
 )
 from app.repositories.provider_repository import ProviderRepository
+from app.repositories.provider_acquisition_cost_repository import ProviderAcquisitionCostRepository
 from app.repositories.ledger_repository import LedgerRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
@@ -32,6 +33,7 @@ from app.services.provider.failover import ProviderFailoverService
 from app.services.provider.health import ProviderHealthService
 from app.services.provider.selector import ProviderSelector
 from app.services.provider_service import ProviderService
+from app.services.provider_acquisition_cost_service import ProviderCostSnapshotService
 from app.services.tv.packages import TVPackageService
 from app.services.tv.pricing import TVPricingService
 from app.services.tv.purchase import TVPurchaseService
@@ -101,6 +103,9 @@ async def get_tv_service(session: AsyncSession = Depends(get_db)) -> TVService:
         user_repository=user_repository,
         wallet_repository=wallet_repository,
         ledger_service=ledger_service,
+        cost_snapshot_service=ProviderCostSnapshotService(
+            ProviderAcquisitionCostRepository(session=session)
+        ),
     )
     reconciliation_service = TVReconciliationService(
         provider_service=provider_service,

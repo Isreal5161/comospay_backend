@@ -169,10 +169,14 @@ async def test_airtime_purchase_service_processes_existing_transaction_with_prov
         wallet_repository=wallet_repository,
     )
 
-    result = await service.process_airtime_purchase(transaction=transaction)
+    result = await service.process_airtime_purchase(
+        transaction=transaction,
+        provider_name="requested-provider",
+    )
 
     assert provider_manager.calls[0]["operation"] == "buy_airtime"
     assert provider_manager.calls[0]["network"] == "GLO"
     assert result["provider"] == "aidapay"
+    assert transaction.provider_name == "aidapay"
     assert transaction.provider_name == "aidapay"
     assert transaction.provider_reference == "prov-ref-001"

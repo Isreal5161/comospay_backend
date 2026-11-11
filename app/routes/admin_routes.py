@@ -32,6 +32,8 @@ from app.repositories.api_key_repository import APIKeyRepository
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.kyc_repository import KYCRepository
 from app.repositories.notification_repository import NotificationRepository
+from app.repositories.platform_income_repository import PlatformIncomeRepository
+from app.repositories.provider_acquisition_cost_repository import ProviderAcquisitionCostRepository
 from app.repositories.provider_repository import ProviderRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
@@ -55,8 +57,13 @@ from app.schemas.admin_schema import (
 from app.schemas.api_key_schema import APIKeyCreate, APIKeyRevokeSchema, APIKeyUpdate
 from app.schemas.audit_log_schema import AuditLogFilterSchema
 from app.schemas.kyc_schema import KYCApprovalSchema
+from app.schemas.provider_acquisition_cost_schema import (
+    ProviderAcquisitionCostCreate,
+    ProviderAcquisitionCostUpdate,
+)
 from app.services.notification_service import build_notification_service
 from app.utils.logger import get_logger
+from app.utils.response import success_response
 from app.services.admin import (
     ApiKeyService,
     AuditService,
@@ -82,6 +89,9 @@ from app.services.admin import (
     WalletAdministrationService,
 )
 from app.services.admin_service import AdminService
+from app.services.provider_acquisition_cost_service import (
+    ProviderAcquisitionCostAdministrationService,
+)
 from app.services.account_state import UserAccountStateService
 from app.services.auth.password_service import PasswordService
 from app.services.auth.session_service import SessionService
@@ -97,6 +107,41 @@ from app.services.wallet.withdrawal import WalletWithdrawalService
 
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
+
+
+async def get_provider_cost_administration_service(
+    session: AsyncSession = Depends(get_db),
+) -> ProviderAcquisitionCostAdministrationService:
+    repository = ProviderAcquisitionCostRepository(session)
+    return ProviderAcquisitionCostAdministrationService(session, repository)
+
+
+def _provider_cost_admin_identity(request: Request, *, write: bool = False) -> tuple[UUID, str]:
+    user = getattr(request.state, "auth_user", None) or getattr(request.state, "user", None)
+    if user is None or getattr(user, "identity_type", None) != "admin":
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail="An administrator identity is required.")
+    role = str(getattr(user, "role", "")).strip().lower().replace(" ", "_")
+    if write and role not in {"admin", "super_admin"}:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail="Only administrators can change provider acquisition costs.")
+    try:
+        admin_id = UUID(str(getattr(user, "user_id", "")))
+    except (ValueError, TypeError) as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail="Administrator identity is invalid.") from exc
+    return admin_id, role
+
+
+def _provider_cost_error(exc: ValueError) -> None:
+    from fastapi import HTTPException
+
+    message = str(exc)
+    status_code = 404 if "was not found" in message.lower() else 422
+    raise HTTPException(status_code=status_code, detail=message) from exc
 
 
 async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminService:
@@ -119,6 +164,8 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
         user_repository = UserRepository(session=session)
         kyc_repository = KYCRepository(session=session)
         transaction_repository = TransactionRepository(session=session)
+        platform_income_repository = PlatformIncomeRepository(session=session)
+        provider_cost_repository = ProviderAcquisitionCostRepository(session=session)
         wallet_repository = WalletRepository(session=session)
         stage = "admin_factory_basic_services_created"
         logger.info("admin_factory_basic_services_created")
@@ -277,6 +324,8 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
                 ledger_service=ledger_service,
                 transaction_repository=transaction_repository,
                 provider_repository=provider_repository,
+                platform_income_repository=platform_income_repository,
+                provider_cost_repository=provider_cost_repository,
             ),
             fraud_service=FraudService(logger=logger),
             provider_service=ProviderAdministrationService(
@@ -514,6 +563,8 @@ async def list_wallets(
         status=status,
         wallet_type=wallet_type,
         currency=currency,
+        service_type=service_type,
+        source_class=source_class,
         query=query,
         order_by=order_by,
         descending=descending,
@@ -541,6 +592,8 @@ async def search_wallets(
         status=status,
         wallet_type=wallet_type,
         currency=currency,
+        service_type=service_type,
+        source_class=source_class,
         order_by=order_by,
         descending=descending,
         request=request,
@@ -988,6 +1041,238 @@ async def get_platform_statistics(
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
     return await controller.get_platform_statistics(request=request)
+
+
+@router.get("/finance", status_code=status.HTTP_200_OK)
+async def get_finance_report(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=255),
+    category: str | None = Query(default=None, max_length=100),
+    status_filter: str | None = Query(default=None, alias="status", max_length=50),
+    provider: str | None = Query(default=None, max_length=100),
+    currency: str | None = Query(default=None, min_length=3, max_length=10),
+    service_type: str | None = Query(default=None, max_length=50),
+    source_class: str | None = Query(default=None, max_length=40),
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_finance_report(
+        page=page,
+        page_size=page_size,
+        search=search,
+        category=category,
+        status=status_filter,
+        provider=provider,
+        currency=currency,
+        service_type=service_type,
+        source_class=source_class,
+        start_date=start_date,
+        end_date=end_date,
+        request=request,
+    )
+
+
+@router.get("/finance/transactions/{transaction_id}", status_code=status.HTTP_200_OK)
+async def get_finance_transaction(
+    transaction_id: UUID,
+    request: Request,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_finance_transaction(transaction_id, request=request)
+
+
+@router.get("/provider-costs/providers", status_code=status.HTTP_200_OK)
+async def list_provider_cost_providers(
+    request: Request,
+    service: ProviderAcquisitionCostAdministrationService = Depends(get_provider_cost_administration_service),
+) -> dict[str, Any]:
+    _provider_cost_admin_identity(request)
+    return success_response(await service.list_providers(), "Provider list retrieved.")
+
+
+@router.get("/provider-costs/configurations", status_code=status.HTTP_200_OK)
+async def list_provider_cost_configurations(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    provider_id: UUID | None = None,
+    service_type: str | None = Query(default=None, max_length=50),
+    network_identifier: str | None = Query(default=None, max_length=120),
+    product_identifier: str | None = Query(default=None, max_length=180),
+    currency: str | None = Query(default=None, min_length=3, max_length=10),
+    is_active: bool | None = None,
+    service: ProviderAcquisitionCostAdministrationService = Depends(get_provider_cost_administration_service),
+) -> dict[str, Any]:
+    _provider_cost_admin_identity(request)
+    result = await service.list_configurations(
+        page=page,
+        page_size=page_size,
+        provider_id=provider_id,
+        service_type=service_type.lower() if service_type else None,
+        network_identifier=network_identifier,
+        product_identifier=product_identifier,
+        currency=currency,
+        is_active=is_active,
+    )
+    return success_response(result, "Provider acquisition-cost configurations retrieved.")
+
+
+@router.post("/provider-costs/configurations", status_code=status.HTTP_201_CREATED)
+async def create_provider_cost_configuration(
+    payload: ProviderAcquisitionCostCreate,
+    request: Request,
+    service: ProviderAcquisitionCostAdministrationService = Depends(get_provider_cost_administration_service),
+) -> dict[str, Any]:
+    admin_id, _ = _provider_cost_admin_identity(request, write=True)
+    try:
+        result = await service.create_configuration(
+            admin_id=admin_id,
+            payload=payload.model_dump(mode="python"),
+        )
+    except ValueError as exc:
+        _provider_cost_error(exc)
+    return success_response(result, "Provider acquisition-cost configuration created.", status.HTTP_201_CREATED)
+
+
+@router.get("/provider-costs/configurations/{config_id}", status_code=status.HTTP_200_OK)
+async def get_provider_cost_configuration(
+    config_id: UUID,
+    request: Request,
+    service: ProviderAcquisitionCostAdministrationService = Depends(get_provider_cost_administration_service),
+) -> dict[str, Any]:
+    _provider_cost_admin_identity(request)
+    try:
+        result = await service.get_configuration(config_id)
+    except ValueError as exc:
+        _provider_cost_error(exc)
+    return success_response(result, "Provider acquisition-cost configuration retrieved.")
+
+
+@router.put("/provider-costs/configurations/{config_id}", status_code=status.HTTP_200_OK)
+async def update_provider_cost_configuration(
+    config_id: UUID,
+    payload: ProviderAcquisitionCostUpdate,
+    request: Request,
+    service: ProviderAcquisitionCostAdministrationService = Depends(get_provider_cost_administration_service),
+) -> dict[str, Any]:
+    admin_id, _ = _provider_cost_admin_identity(request, write=True)
+    try:
+        result = await service.update_configuration(
+            config_id,
+            admin_id=admin_id,
+            payload=payload.model_dump(mode="python", exclude_unset=True),
+        )
+    except ValueError as exc:
+        _provider_cost_error(exc)
+    return success_response(result, "Provider acquisition-cost configuration version created.")
+
+
+@router.post("/provider-costs/configurations/{config_id}/deactivate", status_code=status.HTTP_200_OK)
+async def deactivate_provider_cost_configuration(
+    config_id: UUID,
+    request: Request,
+    service: ProviderAcquisitionCostAdministrationService = Depends(get_provider_cost_administration_service),
+) -> dict[str, Any]:
+    admin_id, _ = _provider_cost_admin_identity(request, write=True)
+    try:
+        result = await service.deactivate_configuration(config_id, admin_id=admin_id)
+    except ValueError as exc:
+        _provider_cost_error(exc)
+    return success_response(result, "Provider acquisition-cost configuration deactivated.")
+
+
+@router.get("/provider-costs/configurations/{config_id}/history", status_code=status.HTTP_200_OK)
+async def get_provider_cost_configuration_history(
+    config_id: UUID,
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    service: ProviderAcquisitionCostAdministrationService = Depends(get_provider_cost_administration_service),
+) -> dict[str, Any]:
+    _provider_cost_admin_identity(request)
+    try:
+        result = await service.list_history(config_id, page=page, page_size=page_size)
+    except ValueError as exc:
+        _provider_cost_error(exc)
+    return success_response(result, "Provider acquisition-cost history retrieved.")
+
+
+@router.get("/provider-costs/configurations/{config_id}/transactions", status_code=status.HTTP_200_OK)
+async def get_provider_cost_configuration_transactions(
+    config_id: UUID,
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    service: ProviderAcquisitionCostAdministrationService = Depends(get_provider_cost_administration_service),
+) -> dict[str, Any]:
+    _provider_cost_admin_identity(request)
+    try:
+        result = await service.transactions_for_configuration(
+            config_id,
+            page=page,
+            page_size=page_size,
+        )
+    except ValueError as exc:
+        _provider_cost_error(exc)
+    return success_response(result, "Transactions using this configuration retrieved.")
+
+
+@router.get("/provider-costs/transactions/awaiting", status_code=status.HTTP_200_OK)
+async def list_transactions_awaiting_provider_cost(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    provider_id: UUID | None = None,
+    service_type: str | None = Query(default=None, max_length=50),
+    currency: str | None = Query(default=None, min_length=3, max_length=10),
+    service: ProviderAcquisitionCostAdministrationService = Depends(get_provider_cost_administration_service),
+) -> dict[str, Any]:
+    _provider_cost_admin_identity(request)
+    result = await service.list_awaiting(
+        page=page,
+        page_size=page_size,
+        provider_id=provider_id,
+        service_type=service_type.lower() if service_type else None,
+        currency=currency,
+    )
+    return success_response(result, "Transactions awaiting cost verification retrieved.")
+
+
+@router.get("/provider-costs/transactions", status_code=status.HTTP_200_OK)
+async def list_provider_cost_snapshots(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    provider_id: UUID | None = None,
+    service_type: str | None = Query(default=None, max_length=50),
+    currency: str | None = Query(default=None, min_length=3, max_length=10),
+    source_class: str | None = Query(default=None, max_length=40),
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    service: ProviderAcquisitionCostAdministrationService = Depends(get_provider_cost_administration_service),
+) -> dict[str, Any]:
+    _provider_cost_admin_identity(request)
+    rows, total = await service.repository.list_snapshots(
+        page=page,
+        page_size=page_size,
+        provider_id=provider_id,
+        service_type=service_type.lower() if service_type else None,
+        currency=currency,
+        source_class=source_class.upper() if source_class else None,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    result = {
+        "items": [service._snapshot_data(snapshot, transaction) for snapshot, transaction in rows],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": (total + page_size - 1) // page_size,
+    }
+    return success_response(result, "Provider cost snapshots retrieved.")
 
 
 @router.get("/monitoring", status_code=status.HTTP_200_OK)

@@ -11,6 +11,7 @@ from app.models.transaction import Transaction
 from app.models.wallet import Wallet
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.wallet_repository import WalletRepository
+from app.services.provider_acquisition_cost_service import ProviderCostSnapshotService
 from app.services.provider_service import ProviderService
 from app.utils.exceptions import PaymentException, ValidationException, WalletException
 
@@ -24,12 +25,14 @@ class AirtimeReconciliationService:
         provider_service: ProviderService,
         transaction_repository: TransactionRepository,
         wallet_repository: WalletRepository,
+        cost_snapshot_service: ProviderCostSnapshotService | None = None,
         logger: logging.Logger | None = None,
         batch_size: int = 100,
     ) -> None:
         self.provider_service = provider_service
         self.transaction_repository = transaction_repository
         self.wallet_repository = wallet_repository
+        self.cost_snapshot_service = cost_snapshot_service
         self.logger = logger or logging.getLogger(__name__)
         self.batch_size = max(1, batch_size)
 
@@ -56,6 +59,8 @@ class AirtimeReconciliationService:
             if discrepancy is None:
                 transaction.metadata_payload = self._update_audit_entry(transaction.metadata_payload, {"event": "reconciled", "status": transaction.status})
                 transaction = await self.transaction_repository.update_transaction(transaction, metadata_payload=transaction.metadata_payload)
+                if transaction.status in {"completed", "succeeded", "settled"} and self.cost_snapshot_service is not None:
+                    await self.cost_snapshot_service.capture_successful_transaction(transaction)
                 self.logger.info("airtime_reconciliation_completed", extra={"reference": reference, "status": transaction.status})
                 return await self._build_response(transaction, discrepancy=None)
 
@@ -79,6 +84,8 @@ class AirtimeReconciliationService:
                     status=transaction.status,
                     metadata_payload=transaction.metadata_payload,
                 )
+                if self.cost_snapshot_service is not None:
+                    await self.cost_snapshot_service.capture_successful_transaction(transaction)
                 self.logger.info(
                     "airtime_reconciliation_completed",
                     extra={"reference": reference, "status": transaction.status, "wallet_id": str(wallet.id) if wallet else None},

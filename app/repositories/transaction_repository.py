@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.transaction import Transaction
 from app.models.user import User
+from app.models.ledger import Ledger
 from app.utils.exceptions import DuplicateProviderReferenceException
 
 
@@ -380,6 +381,194 @@ class TransactionRepository:
             "pending": int(row.pending or 0),
             "failed": int(row.failed or 0),
         }
+
+    async def get_finance_aggregates(
+        self,
+        *,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        category: str | None = None,
+        provider: str | None = None,
+        currency: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Aggregate completed transaction principal and posted wallet adjustments."""
+        transaction_filters: list[Any] = [
+            func.lower(Transaction.status).in_(self._CASE_INSENSITIVE_SUCCESS_STATUSES + ("settled",)),
+            ~func.lower(Transaction.category).like("%refund%"),
+            ~func.lower(Transaction.category).like("%reversal%"),
+            ~func.lower(Transaction.transaction_type).like("%refund%"),
+            ~func.lower(Transaction.transaction_type).like("%reversal%"),
+        ]
+        if start_date is not None:
+            transaction_filters.append(Transaction.created_at >= start_date)
+        if end_date is not None:
+            transaction_filters.append(Transaction.created_at <= end_date)
+        if category:
+            transaction_filters.append(func.lower(Transaction.category) == category.strip().lower())
+        if provider:
+            transaction_filters.append(func.lower(Transaction.provider_name) == provider.strip().lower())
+        if currency:
+            transaction_filters.append(func.upper(Transaction.currency) == currency.strip().upper())
+
+        period_expression = func.date(Transaction.created_at)
+        if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
+            period_expression = func.date(func.timezone("UTC", Transaction.created_at))
+        result = await self.session.execute(
+            select(
+                Transaction.currency,
+                Transaction.category,
+                Transaction.transaction_type,
+                Transaction.provider_name,
+                period_expression.label("period"),
+                func.sum(Transaction.amount).label("amount"),
+                func.sum(Transaction.charges).label("charges"),
+                func.count(Transaction.id).label("count"),
+            )
+            .where(*transaction_filters)
+            .group_by(
+                Transaction.currency,
+                Transaction.category,
+                Transaction.transaction_type,
+                Transaction.provider_name,
+                period_expression,
+            )
+        )
+        transaction_rows = [
+            {
+                "currency": row.currency,
+                "category": row.category,
+                "transaction_type": row.transaction_type,
+                "provider_name": row.provider_name,
+                "period": str(row.period),
+                "amount": row.amount or Decimal("0"),
+                "charges": row.charges or Decimal("0"),
+                "count": int(row.count or 0),
+            }
+            for row in result.all()
+        ]
+
+        status_filters: list[Any] = []
+        if start_date is not None:
+            status_filters.append(Transaction.created_at >= start_date)
+        if end_date is not None:
+            status_filters.append(Transaction.created_at <= end_date)
+        if category:
+            status_filters.append(func.lower(Transaction.category) == category.strip().lower())
+        if provider:
+            status_filters.append(func.lower(Transaction.provider_name) == provider.strip().lower())
+        if currency:
+            status_filters.append(func.upper(Transaction.currency) == currency.strip().upper())
+        status_result = await self.session.execute(
+            select(
+                Transaction.currency,
+                func.lower(Transaction.status).label("status"),
+                func.count(Transaction.id).label("count"),
+            )
+            .where(*status_filters)
+            .group_by(Transaction.currency, func.lower(Transaction.status))
+        )
+        status_rows = [
+            {"currency": row.currency, "status": row.status, "count": int(row.count or 0)}
+            for row in status_result.all()
+        ]
+
+        adjustment_filters: list[Any] = [
+            func.lower(Ledger.status).in_(self._CASE_INSENSITIVE_SUCCESS_STATUSES + ("settled",)),
+            or_(
+                func.lower(Ledger.entry_type).in_(("refund", "reversal")),
+                func.lower(Ledger.transaction_type).like("%refund%"),
+                func.lower(Ledger.transaction_type).like("%reversal%"),
+            ),
+        ]
+        if start_date is not None:
+            adjustment_filters.append(Ledger.created_at >= start_date)
+        if end_date is not None:
+            adjustment_filters.append(Ledger.created_at <= end_date)
+
+        adjustment_result = await self.session.execute(
+            select(
+                Ledger.currency,
+                Ledger.entry_type,
+                Ledger.transaction_type,
+                func.sum(Ledger.credit_amount).label("credits"),
+                func.sum(Ledger.debit_amount).label("debits"),
+            )
+            .where(*adjustment_filters)
+            .group_by(Ledger.currency, Ledger.entry_type, Ledger.transaction_type)
+        )
+        adjustment_rows = [
+            {
+                "currency": row.currency,
+                "entry_type": row.entry_type,
+                "transaction_type": row.transaction_type,
+                "credits": row.credits or Decimal("0"),
+                "debits": row.debits or Decimal("0"),
+            }
+            for row in adjustment_result.all()
+        ]
+        activity_filters: list[Any] = []
+        if start_date is not None:
+            activity_filters.append(Transaction.created_at >= start_date)
+        if end_date is not None:
+            activity_filters.append(Transaction.created_at <= end_date)
+        category_result = await self.session.execute(
+            select(func.distinct(Transaction.category)).where(*activity_filters).order_by(Transaction.category)
+        )
+        currency_result = await self.session.execute(
+            select(func.distinct(Transaction.currency)).where(*activity_filters).order_by(Transaction.currency)
+        )
+        return {
+            "transactions": transaction_rows,
+            "transaction_status_counts": status_rows,
+            "adjustments": adjustment_rows,
+            "available_categories": [row[0] for row in category_result.all()],
+            "available_currencies": [row[0] for row in currency_result.all()],
+        }
+
+    async def get_finance_activity(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        category: str | None = None,
+        status: str | None = None,
+        provider: str | None = None,
+        currency: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> tuple[list[Transaction], int]:
+        return await self.get_admin_transactions(
+            page=page,
+            page_size=page_size,
+            search=search,
+            category=category,
+            status=status,
+            provider=provider,
+            currency=currency,
+            start_date=start_date,
+            end_date=end_date,
+            include_user=False,
+        )
+
+    async def get_finance_transaction(self, transaction_id: UUID) -> tuple[Transaction | None, list[Ledger]]:
+        transaction_result = await self.session.execute(
+            select(Transaction).where(Transaction.id == transaction_id)
+        )
+        transaction = transaction_result.scalar_one_or_none()
+        if transaction is None:
+            return None, []
+        ledger_result = await self.session.execute(
+            select(Ledger)
+            .where(
+                or_(
+                    Ledger.related_transaction_id == transaction.id,
+                    Ledger.transaction_reference == transaction.reference,
+                )
+            )
+            .order_by(Ledger.created_at, Ledger.ledger_id)
+        )
+        return transaction, list(ledger_result.scalars().all())
 
     @staticmethod
     def _admin_transaction_filters(

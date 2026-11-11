@@ -233,7 +233,10 @@ async def test_electricity_purchase_service_processes_existing_transaction_with_
         ledger_service=FakeLedgerService(),
     )
 
-    result = await service.process_electricity_purchase(transaction=transaction)
+    result = await service.process_electricity_purchase(
+        transaction=transaction,
+        provider_name="requested-provider",
+    )
 
     assert provider_manager.calls[0]["operation"] == "purchase_electricity"
     assert provider_manager.calls[0]["provider"] == "EKEDC"

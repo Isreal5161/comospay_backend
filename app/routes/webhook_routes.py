@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.database import get_db
 from app.controllers.webhook_controller import WebhookController
 from app.repositories.notification_repository import NotificationRepository
+from app.repositories.provider_acquisition_cost_repository import ProviderAcquisitionCostRepository
 from app.repositories.provider_repository import ProviderRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.routes.airtime_routes import get_airtime_service as get_airtime_domain_service
@@ -36,6 +37,7 @@ from app.services.provider.failover import ProviderFailoverService
 from app.services.provider.health import ProviderHealthService
 from app.services.provider.selector import ProviderSelector
 from app.services.provider_service import ProviderService
+from app.services.provider_acquisition_cost_service import ProviderCostSnapshotService
 from app.services.webhook.cloud import CloudWebhookService
 from app.services.webhook.education import EducationWebhookService
 from app.services.webhook.flutterwave import FlutterwaveWebhookService
@@ -127,12 +129,16 @@ def _build_giftcard_service(*, session: AsyncSession, provider_service: Provider
     wallet_repository = WalletRepository(session=session)
 
     wallet_service = _build_wallet_service(session=session, user_repository=user_repository, wallet_repository=wallet_repository, transaction_repository=transaction_repository)
+    cost_snapshot_service = ProviderCostSnapshotService(
+        ProviderAcquisitionCostRepository(session=session)
+    )
     trading_service = GiftCardTradingService(
         wallet_service=wallet_service,
         provider_service=provider_service,
         transaction_repository=transaction_repository,
         user_repository=user_repository,
         wallet_repository=wallet_repository,
+        cost_snapshot_service=cost_snapshot_service,
     )
     settings_repository = SystemSettingsRepository(session=session)
     valuation_service = GiftCardValuationService(
@@ -150,6 +156,7 @@ def _build_giftcard_service(*, session: AsyncSession, provider_service: Provider
     reconciliation_service = GiftCardReconciliationService(
         provider_service=provider_service,
         transaction_repository=transaction_repository,
+        cost_snapshot_service=cost_snapshot_service,
     )
 
     return GiftCardService(
