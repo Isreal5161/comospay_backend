@@ -3,6 +3,7 @@ from app.models.api_key import APIKey
 from app.models.audit_log import AuditLog
 from app.models.bank_account import BankAccount
 from app.models.device import Device
+from app.models.fraud_investigation import FraudInvestigation, FraudInvestigationEvent
 from app.models.kyc import KYC
 from app.models.ledger import Ledger
 from app.models.notification import Notification
@@ -24,6 +25,8 @@ __all__ = [
     "AuditLog",
     "BankAccount",
     "Device",
+    "FraudInvestigation",
+    "FraudInvestigationEvent",
     "KYC",
     "Ledger",
     "Notification",

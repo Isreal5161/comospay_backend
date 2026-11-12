@@ -7,13 +7,14 @@ from typing import Any, Literal
 from uuid import UUID
 import importlib
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Body, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
 from app.controllers.admin_controller import (
     AdminController,
     AdminDashboardRequest,
+    FraudReviewRequest,
     NotificationBroadcastRequest,
     ProviderManagementRequest,
     ReportGenerationRequest,
@@ -327,7 +328,13 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
                 platform_income_repository=platform_income_repository,
                 provider_cost_repository=provider_cost_repository,
             ),
-            fraud_service=FraudService(logger=logger),
+            fraud_service=FraudService(
+                logger=logger,
+                user_repository=user_repository,
+                transaction_repository=transaction_repository,
+                wallet_repository=wallet_repository,
+                audit_repository=audit_repository,
+            ),
             provider_service=ProviderAdministrationService(
                 logger=logger,
                 provider_repository=provider_repository,
@@ -418,6 +425,37 @@ async def get_current_admin(
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
     return await controller.get_me(request=request)
+
+
+@router.get("/fraud", status_code=status.HTTP_200_OK)
+async def get_fraud_monitoring(
+    request: Request,
+    page: int = Query(default=1, ge=1, le=1_000_000),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=255),
+    status: str | None = Query(default=None, max_length=50),
+    risk_level: str | None = Query(default=None, max_length=20),
+    event_type: str | None = Query(default=None, max_length=50),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.list_fraud(
+        page=page,
+        page_size=page_size,
+        search=search,
+        status=status,
+        risk_level=risk_level,
+        event_type=event_type,
+        request=request,
+    )
+
+
+@router.post("/fraud/review", status_code=status.HTTP_200_OK)
+async def review_fraud_monitoring(
+    request: Request,
+    payload: FraudReviewRequest = Body(...),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.review_fraud_signal(payload=payload, request=request)
 
 
 @router.get(

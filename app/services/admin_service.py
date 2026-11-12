@@ -132,6 +132,12 @@ class AdminService:
     async def list_kyc(self, **payload: Any) -> dict[str, Any]:
         return await self.kyc_service.list_kyc(**payload)
 
+    async def list_fraud(self, **payload: Any) -> dict[str, Any]:
+        return await self.fraud_service.list_fraud(**payload)
+
+    async def review_fraud_signal(self, **payload: Any) -> dict[str, Any]:
+        return await self.fraud_service.review_fraud_signal(**payload)
+
     async def get_user_kyc(self, *, user_id, **payload: Any) -> dict[str, Any]:
         return await self.kyc_service.get_user_kyc(user_id=user_id, **payload)
 

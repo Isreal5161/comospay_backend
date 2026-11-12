@@ -3,11 +3,11 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Awaitable, Callable, Protocol, cast
+from typing import Any, Awaitable, Callable, Literal, Protocol, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, status, status as http_status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.admin_schema import (
     AdminCreate,
@@ -130,6 +130,16 @@ class ReportGenerationRequest(BaseModel):
     end_date: str | None = Field(default=None, description="Optional end date filter.")
 
 
+class FraudReviewRequest(BaseModel):
+    """Validated request for a persisted fraud investigation transition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    signal_id: str = Field(..., min_length=1, max_length=80)
+    action: Literal["review", "dismiss", "escalate", "resolve"]
+    reason: str | None = Field(default=None, max_length=500)
+
+
 class AdminController:
     """Thin FastAPI controller for administrative operations."""
 
@@ -146,6 +156,8 @@ class AdminController:
             response_model=DashboardResponse,
         )(self.get_dashboard)
         self.router.get("/me", status_code=status.HTTP_200_OK)(self.get_me)
+        self.router.get("/fraud", status_code=status.HTTP_200_OK)(self.list_fraud)
+        self.router.post("/fraud/review", status_code=status.HTTP_200_OK)(self.review_fraud_signal)
         self.router.get(
             "/users",
             status_code=status.HTTP_200_OK,
@@ -240,6 +252,67 @@ class AdminController:
             payload={"admin_id": admin_id, "token_role": str(getattr(auth_user, "role", ""))},
             success_message="Admin profile retrieved successfully.",
         )
+
+    async def list_fraud(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        status: str | None = None,
+        risk_level: str | None = None,
+        event_type: str | None = None,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        """Handle fraud monitoring requests."""
+        target_admin_id = self._require_authenticated_admin_id(request)
+        return await self._execute(
+            action="list_fraud",
+            handler=self._resolve_handler("list_fraud"),
+            payload={
+                "admin_id": target_admin_id,
+                "page": page,
+                "page_size": page_size,
+                "search": search,
+                "status": status,
+                "risk_level": risk_level,
+                "event_type": event_type,
+            },
+            success_message="Fraud review data retrieved successfully.",
+        )
+
+    async def review_fraud_signal(
+        self,
+        payload: FraudReviewRequest,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        """Handle manual fraud review requests."""
+        target_admin_id = self._require_authenticated_admin_id(request)
+        auth_user = getattr(request.state, "auth_user", None)
+        role = str(getattr(auth_user, "role", "")).strip().lower().replace(" ", "_")
+        if role not in {"admin", "super_admin"}:
+            raise AuthorizationException(detail="Your administrator role cannot review fraud signals.")
+        return await self._execute(
+            action="review_fraud_signal",
+            handler=self._resolve_handler("review_fraud_signal"),
+            payload={
+                "reviewer_admin_id": target_admin_id,
+                **payload.model_dump(exclude_unset=True),
+            },
+            success_message="Fraud signal reviewed successfully.",
+        )
+
+    @staticmethod
+    def _require_authenticated_admin_id(request: Request) -> UUID:
+        auth_user = getattr(request.state, "auth_user", None)
+        if auth_user is None or getattr(auth_user, "identity_type", None) != "admin":
+            raise AuthorizationException(detail="An Admin identity is required.")
+        try:
+            return UUID(str(getattr(auth_user, "user_id", "")))
+        except (ValueError, TypeError) as exc:
+            raise AuthorizationException(detail="Administrator identity is invalid.") from exc
 
     async def list_users(
         self,
