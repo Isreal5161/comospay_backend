@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import String, cast, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only, noload, selectinload
 
 from app.models.user import User
 from app.models.wallet import Wallet
@@ -110,7 +111,35 @@ class WalletRepository:
         if page_size < 1:
             page_size = 20
 
-        query = select(Wallet)
+        query = select(Wallet).options(
+            load_only(
+                Wallet.id,
+                Wallet.user_id,
+                Wallet.wallet_reference,
+                Wallet.wallet_type,
+                Wallet.currency,
+                Wallet.status,
+                Wallet.available_balance,
+                Wallet.ledger_balance,
+                Wallet.locked_balance,
+                Wallet.is_active,
+                Wallet.is_frozen,
+                Wallet.is_suspended,
+                Wallet.created_at,
+                Wallet.updated_at,
+            ),
+            selectinload(Wallet.user).load_only(
+                User.id,
+                User.first_name,
+                User.last_name,
+                User.username,
+                User.email,
+                User.phone,
+            ),
+            noload(Wallet.virtual_accounts),
+            noload(Wallet.ledgers),
+            noload(Wallet.transactions),
+        )
         count_query = select(func.count(Wallet.id))
 
         query, count_query = self._apply_wallet_filters(
@@ -128,9 +157,12 @@ class WalletRepository:
         order_column = getattr(Wallet, order_by, Wallet.created_at)
         if descending:
             order_column = order_column.desc()
+            tie_breaker = Wallet.id.desc()
+        else:
+            tie_breaker = Wallet.id.asc()
 
         result = await self.session.execute(
-            query.order_by(order_column).offset((page - 1) * page_size).limit(page_size)
+            query.order_by(order_column, tie_breaker).offset((page - 1) * page_size).limit(page_size)
         )
         return list(result.scalars().all()), total
 

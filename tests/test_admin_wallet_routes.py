@@ -9,7 +9,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -86,6 +86,7 @@ def build_route_app(
     )
     controller = AdminController(SimpleNamespace(
         list_wallets=wallet_service.list_wallets,
+        search_wallets=wallet_service.search_wallets,
         adjust_wallet=wallet_service.adjust_wallet,
         get_user_ledger=wallet_service.get_user_ledger,
         get_user_ledger_by_reference=wallet_service.get_user_ledger_by_reference,
@@ -289,6 +290,229 @@ async def test_get_admin_wallets_route_returns_authorized_database_records(route
     assert data["items"][0]["user_name"] == "Wallet Customer"
     assert data["items"][0]["user_email"] == user.email
     assert data["items"][0]["available_balance"] == "100.00"
+
+
+@pytest.mark.asyncio
+async def test_get_admin_wallets_returns_valid_empty_page(route_session):
+    app, _ = build_route_app(route_session)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/admin/wallets?page=1&page_size=10",
+            headers={"x-test-admin-id": str(ADMIN_ID)},
+        )
+
+    assert response.status_code == 200
+    data = response.json()["data"]["data"]
+    assert data["items"] == []
+    assert data["total"] == 0
+    assert data["total_wallets"] == 0
+    assert data["currencies"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_admin_wallets_paginates_multiple_records_deterministically(route_session):
+    _, first_wallet = await add_route_wallet(
+        route_session,
+        email="wallet-page-one@example.test",
+        phone="+15555550101",
+        wallet_reference="wallet-page-one",
+    )
+    _, second_wallet = await add_route_wallet(
+        route_session,
+        email="wallet-page-two@example.test",
+        phone="+15555550102",
+        wallet_reference="wallet-page-two",
+    )
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    first_wallet.created_at = timestamp
+    second_wallet.created_at = timestamp
+    await route_session.commit()
+    app, _ = build_route_app(route_session)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        page_one = await client.get(
+            "/admin/wallets?page=1&page_size=1",
+            headers={"x-test-admin-id": str(ADMIN_ID)},
+        )
+        repeated_page_one = await client.get(
+            "/admin/wallets?page=1&page_size=1",
+            headers={"x-test-admin-id": str(ADMIN_ID)},
+        )
+        page_two = await client.get(
+            "/admin/wallets?page=2&page_size=1",
+            headers={"x-test-admin-id": str(ADMIN_ID)},
+        )
+
+    assert page_one.status_code == repeated_page_one.status_code == page_two.status_code == 200
+    first_data = page_one.json()["data"]["data"]
+    repeated_data = repeated_page_one.json()["data"]["data"]
+    second_data = page_two.json()["data"]["data"]
+    assert first_data["total"] == second_data["total"] == 2
+    assert first_data["items"][0]["id"] == repeated_data["items"][0]["id"]
+    assert first_data["items"][0]["id"] != second_data["items"][0]["id"]
+    assert {first_data["items"][0]["id"], second_data["items"][0]["id"]} == {
+        str(first_wallet.id),
+        str(second_wallet.id),
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_admin_wallets_handles_missing_optional_user_relationship(route_session):
+    wallet = Wallet(
+        user_id=UUID("22222222-2222-4222-8222-222222222222"),
+        wallet_reference="wallet-without-user",
+        currency="NGN",
+        available_balance=Decimal("0.00"),
+        ledger_balance=Decimal("0.00"),
+        locked_balance=Decimal("0.00"),
+    )
+    route_session.add(wallet)
+    await route_session.commit()
+    app, _ = build_route_app(route_session)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/admin/wallets?page=1&page_size=10",
+            headers={"x-test-admin-id": str(ADMIN_ID)},
+        )
+
+    assert response.status_code == 200
+    item = response.json()["data"]["data"]["items"][0]
+    assert item["id"] == str(wallet.id)
+    assert item["user_name"] is None
+    assert item["user_email"] is None
+    assert item["user_phone"] is None
+    assert item["available_balance"] == "0.00"
+
+
+@pytest.mark.asyncio
+async def test_get_admin_wallets_does_not_load_unneeded_sensitive_or_financial_relations(route_session):
+    await add_route_wallet(route_session)
+    app, _ = build_route_app(route_session)
+    statements = []
+    connection = route_session.bind.sync_engine
+    listener = lambda *args: statements.append(args[2]) if args[2].lstrip().upper().startswith("SELECT") else None
+    event.listen(connection, "before_cursor_execute", listener)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/admin/wallets?page=1&page_size=10",
+                headers={"x-test-admin-id": str(ADMIN_ID)},
+            )
+    finally:
+        event.remove(connection, "before_cursor_execute", listener)
+
+    assert response.status_code == 200
+    sql = "\n".join(statements).lower()
+    assert "password_hash" not in sql
+    assert "transaction_pin_reference" not in sql
+    assert "from ledgers" not in sql
+    assert "from transactions" not in sql
+    assert "from virtual_accounts" not in sql
+
+
+@pytest.mark.asyncio
+async def test_wallet_search_route_uses_supported_filters(route_session):
+    user, wallet = await add_route_wallet(route_session)
+    app, _ = build_route_app(route_session)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/admin/wallets/search",
+            params={"query": user.email, "page": 1, "page_size": 10},
+            headers={"x-test-admin-id": str(ADMIN_ID)},
+        )
+
+    assert response.status_code == 200
+    data = response.json()["data"]["data"]
+    assert data["total"] == 1
+    assert data["items"][0]["id"] == str(wallet.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("page", "page_size"),
+    [(0, 10), (1, 0), (1, 101)],
+)
+async def test_get_admin_wallets_validates_pagination_bounds(route_session, page, page_size):
+    app, _ = build_route_app(route_session)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/admin/wallets",
+            params={"page": page, "page_size": page_size},
+            headers={"x-test-admin-id": str(ADMIN_ID)},
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_admin_wallets_rejects_unsupported_order_field(route_session):
+    app, _ = build_route_app(route_session)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/admin/wallets",
+            params={"order_by": "metadata_payload"},
+            headers={"x-test-admin-id": str(ADMIN_ID)},
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_admin_wallets_does_not_expose_database_exception_details(route_session):
+    async def fail_query(**kwargs):
+        raise RuntimeError("sensitive database diagnostic")
+
+    wallet_service = WalletAdministrationService(
+        wallet_repository=SimpleNamespace(list_wallets=fail_query),
+        admin_repository=RouteAdminRepository(),
+        session=route_session,
+    )
+    controller = AdminController(SimpleNamespace(list_wallets=wallet_service.list_wallets))
+    app = FastAPI()
+    app.include_router(admin_routes.router)
+
+    @app.middleware("http")
+    async def attach_test_admin_context(request, call_next):
+        request.state.auth_user = SimpleNamespace(user_id=str(ADMIN_ID))
+        return await call_next(request)
+
+    async def override_admin_controller():
+        return controller
+
+    app.dependency_overrides[admin_routes.get_admin_controller] = override_admin_controller
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/admin/wallets?page=1&page_size=10")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "An unexpected error occurred while processing the request."
+    assert "sensitive database diagnostic" not in response.text
 
 
 @pytest.mark.asyncio
