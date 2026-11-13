@@ -13,6 +13,7 @@ from app.models.platform_income_reversal import PlatformIncomeReversal
 from app.models.provider_acquisition_cost import ProviderAcquisitionCost, ProviderCostSnapshot
 from app.models.provider import Provider
 from app.models.provider_log import ProviderLog
+from app.models.support import SupportMessage, SupportTicket
 from app.models.system_settings import SystemSettings
 from app.models.transaction import Transaction
 from app.models.user import User
@@ -38,6 +39,8 @@ __all__ = [
     "Provider",
     "ProviderLog",
     "SystemSettings",
+    "SupportMessage",
+    "SupportTicket",
     "Transaction",
     "User",
     "VirtualAccount",

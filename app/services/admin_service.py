@@ -138,6 +138,21 @@ class AdminService:
     async def review_fraud_signal(self, **payload: Any) -> dict[str, Any]:
         return await self.fraud_service.review_fraud_signal(**payload)
 
+    async def list_support_tickets(self, **payload: Any) -> dict[str, Any]:
+        return await self.support_service.list_support_tickets(**payload)
+
+    async def list_support_assignees(self, **payload: Any) -> dict[str, Any]:
+        return await self.support_service.list_support_assignees(**payload)
+
+    async def get_support_ticket(self, **payload: Any) -> dict[str, Any]:
+        return await self.support_service.get_support_ticket(**payload)
+
+    async def reply_to_support_ticket(self, **payload: Any) -> dict[str, Any]:
+        return await self.support_service.reply_to_support_ticket(**payload)
+
+    async def update_support_ticket(self, **payload: Any) -> dict[str, Any]:
+        return await self.support_service.update_support_ticket(**payload)
+
     async def get_user_kyc(self, *, user_id, **payload: Any) -> dict[str, Any]:
         return await self.kyc_service.get_user_kyc(user_id=user_id, **payload)
 

@@ -73,6 +73,34 @@ class AdminRepository:
         admins = list(result.scalars().all())
         return admins, total
 
+    async def get_support_assignees(
+        self,
+        *,
+        roles: tuple[str, ...] = ("admin", "super_admin", "support"),
+        limit: int = 100,
+    ) -> list[Admin]:
+        """Return a bounded, ordered list of active administrators eligible for Support."""
+        normalized_roles = tuple(role.strip().lower().replace(" ", "_") for role in roles if role.strip())
+        if not normalized_roles:
+            return []
+        bounded_limit = min(max(limit, 1), 100)
+        result = await self.session.execute(
+            select(Admin)
+            .where(
+                Admin.is_active.is_(True),
+                func.lower(func.trim(Admin.status)) == "active",
+                func.lower(func.trim(Admin.role)).in_(normalized_roles),
+            )
+            .order_by(
+                func.lower(func.coalesce(Admin.first_name, "")),
+                func.lower(func.coalesce(Admin.last_name, "")),
+                func.lower(func.coalesce(Admin.username, "")),
+                Admin.id,
+            )
+            .limit(bounded_limit)
+        )
+        return list(result.scalars().all())
+
     async def update(self, admin: Admin, **fields: Any) -> Admin:
         """Update editable admin fields in the database."""
         for field, value in fields.items():

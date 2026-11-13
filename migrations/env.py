@@ -1,19 +1,35 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from alembic import context
+from dotenv import load_dotenv
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from app.database.base import Base
+from app.models import *  # noqa: F401,F403
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+
 config = context.config
-database_url = os.environ.get("TEST_DATABASE_URL", "").strip()
+database_url = (
+    os.environ.get("MIGRATION_DATABASE_URL", "").strip()
+    or os.environ.get("DATABASE_URL", "").strip()
+)
+if not database_url:
+    raise RuntimeError(
+        "MIGRATION_DATABASE_URL or DATABASE_URL must be set to run migrations."
+    )
 if not database_url.startswith("postgresql+asyncpg://"):
-    raise RuntimeError("TEST_DATABASE_URL must be an explicit PostgreSQL asyncpg URL.")
+    raise RuntimeError(
+        "Migration database URL must use the postgresql+asyncpg:// scheme."
+    )
 config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:

@@ -5,9 +5,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
 
-from sqlalchemy import MetaData, text
+from dotenv import dotenv_values
+from sqlalchemy import MetaData, make_url, text
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app import models  # noqa: F401 - register every ORM model with Base.metadata
@@ -29,18 +30,56 @@ MIGRATION_OWNED_COLUMNS = {
 }
 
 
+def _configured_value(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    env_path = BACKEND_ROOT / ".env"
+    if not env_path.is_file():
+        return ""
+    return str(dotenv_values(env_path).get(name) or "").strip()
+
+
+def _database_target(value: str, *, label: str) -> tuple[str, int, str, str]:
+    try:
+        parsed = make_url(value)
+    except (ArgumentError, ValueError) as exc:
+        raise SystemExit(f"{label} is malformed.") from exc
+
+    username = parsed.username or ""
+    project_ref = username.rsplit(".", 1)[-1] if "." in username else ""
+    if (
+        parsed.drivername != "postgresql+asyncpg"
+        or parsed.host is None
+        or parsed.port is None
+        or parsed.database is None
+    ):
+        raise SystemExit(f"{label} must be a complete PostgreSQL asyncpg URL.")
+    if "pooler.supabase.com" not in parsed.host:
+        raise SystemExit(f"{label} must target a Supabase session pooler.")
+    if not project_ref:
+        raise SystemExit(f"{label} is missing its pooler project reference.")
+    return parsed.host.lower(), parsed.port, parsed.database, project_ref
+
+
 def require_test_url() -> str:
-    value = os.environ.get("TEST_DATABASE_URL", "").strip()
+    value = _configured_value("TEST_DATABASE_URL")
+    if not value:
+        raise SystemExit("TEST_DATABASE_URL must be configured in the process environment or backend .env.")
     if not value.startswith("postgresql+asyncpg://"):
         raise SystemExit("TEST_DATABASE_URL must be an explicit PostgreSQL asyncpg URL.")
-    parsed = urlsplit(value)
-    if parsed.hostname is None or "pooler.supabase.com" not in parsed.hostname:
-        raise SystemExit("TEST_DATABASE_URL must target the Supabase session pooler.")
-    if TEST_PROJECT_REF not in (parsed.username or ""):
+    test_target = _database_target(value, label="TEST_DATABASE_URL")
+    if test_target[3] != TEST_PROJECT_REF:
         raise SystemExit("TEST_DATABASE_URL does not identify the dedicated test project.")
-    production = os.environ.get("DATABASE_URL", "").strip()
-    if production and production == value:
-        raise SystemExit("Refusing to run when DATABASE_URL equals TEST_DATABASE_URL.")
+
+    application_value = _configured_value("DATABASE_URL")
+    if not application_value:
+        raise SystemExit("DATABASE_URL must be configured to verify test database isolation.")
+    application_target = _database_target(application_value, label="DATABASE_URL")
+    if test_target == application_target:
+        raise SystemExit("Refusing to run because TEST_DATABASE_URL matches DATABASE_URL.")
+    if test_target[3] == application_target[3]:
+        raise SystemExit("Refusing to run because TEST_DATABASE_URL shares the application project reference.")
     return value
 
 
@@ -74,6 +113,8 @@ def baseline_metadata() -> MetaData:
 
 
 async def create_baseline(url: str) -> None:
+    if url != require_test_url():
+        raise SystemExit("Refusing to initialize an unvalidated test database target.")
     engine = create_async_engine(url, pool_pre_ping=True, connect_args={"ssl": "require", "timeout": 15})
     try:
         async with engine.begin() as connection:
@@ -108,9 +149,17 @@ def main() -> None:
     subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=BACKEND_ROOT,
-        env={**os.environ, "TEST_DATABASE_URL": url},
+        env=_alembic_environment(url),
         check=True,
     )
+
+
+def _alembic_environment(validated_test_url: str) -> dict[str, str]:
+    child_env = dict(os.environ)
+    child_env["DATABASE_URL"] = ""
+    child_env["TEST_DATABASE_URL"] = validated_test_url
+    child_env["MIGRATION_DATABASE_URL"] = validated_test_url
+    return child_env
 
 
 if __name__ == "__main__":

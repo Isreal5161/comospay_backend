@@ -18,6 +18,8 @@ from app.controllers.admin_controller import (
     NotificationBroadcastRequest,
     ProviderManagementRequest,
     ReportGenerationRequest,
+    SupportTicketReplyRequest,
+    SupportTicketUpdateRequest,
     TransactionResolveRequest,
     TransactionRetryRequest,
     SystemSettingsRequest,
@@ -36,6 +38,7 @@ from app.repositories.notification_repository import NotificationRepository
 from app.repositories.platform_income_repository import PlatformIncomeRepository
 from app.repositories.provider_acquisition_cost_repository import ProviderAcquisitionCostRepository
 from app.repositories.provider_repository import ProviderRepository
+from app.repositories.support_repository import SupportTicketRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.wallet_repository import WalletRepository
@@ -381,7 +384,13 @@ async def get_admin_service(session: AsyncSession = Depends(get_db)) -> AdminSer
                 password_service=password_service,
                 session=session,
             ),
-            support_service=SupportAdministrationService(logger=logger),
+            support_service=SupportAdministrationService(
+                session=session,
+                support_repository=SupportTicketRepository(session=session),
+                user_repository=user_repository,
+                admin_repository=admin_repository,
+                logger=logger,
+            ),
             security_service=SecurityAdministrationService(logger=logger),
             session_service=SessionAdministrationService(
                 logger=logger,
@@ -456,6 +465,63 @@ async def review_fraud_monitoring(
     controller: AdminController = Depends(get_admin_controller),
 ) -> dict[str, Any]:
     return await controller.review_fraud_signal(payload=payload, request=request)
+
+
+@router.get("/support", status_code=status.HTTP_200_OK)
+async def list_support_tickets(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=255),
+    status: str | None = Query(default=None, max_length=32),
+    priority: str | None = Query(default=None, max_length=32),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.list_support_tickets(
+        page=page,
+        page_size=page_size,
+        search=search,
+        status=status,
+        priority=priority,
+        request=request,
+    )
+
+
+@router.get("/support/assignees", status_code=status.HTTP_200_OK)
+async def list_support_assignees(
+    request: Request,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.list_support_assignees(request=request)
+
+
+@router.get("/support/{ticket_id}", status_code=status.HTTP_200_OK)
+async def get_support_ticket(
+    ticket_id: str,
+    request: Request,
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.get_support_ticket(ticket_id=ticket_id, request=request)
+
+
+@router.post("/support/{ticket_id}/reply", status_code=status.HTTP_200_OK)
+async def reply_to_support_ticket(
+    ticket_id: str,
+    request: Request,
+    payload: SupportTicketReplyRequest = Body(...),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.reply_to_support_ticket(ticket_id=ticket_id, payload=payload, request=request)
+
+
+@router.patch("/support/{ticket_id}/status", status_code=status.HTTP_200_OK)
+async def update_support_ticket(
+    ticket_id: str,
+    request: Request,
+    payload: SupportTicketUpdateRequest = Body(...),
+    controller: AdminController = Depends(get_admin_controller),
+) -> dict[str, Any]:
+    return await controller.update_support_ticket(ticket_id=ticket_id, payload=payload, request=request)
 
 
 @router.get(

@@ -140,6 +140,26 @@ class FraudReviewRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class SupportTicketReplyRequest(BaseModel):
+    """Validated request body for a support-message reply."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(..., min_length=1, max_length=5000)
+    is_internal: bool = Field(default=False)
+
+
+class SupportTicketUpdateRequest(BaseModel):
+    """Validated request for changing support ticket state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str | None = Field(default=None, max_length=32)
+    priority: str | None = Field(default=None, max_length=32)
+    assignee_id: UUID | None = Field(default=None)
+    note: str | None = Field(default=None, max_length=500)
+
+
 class AdminController:
     """Thin FastAPI controller for administrative operations."""
 
@@ -158,6 +178,11 @@ class AdminController:
         self.router.get("/me", status_code=status.HTTP_200_OK)(self.get_me)
         self.router.get("/fraud", status_code=status.HTTP_200_OK)(self.list_fraud)
         self.router.post("/fraud/review", status_code=status.HTTP_200_OK)(self.review_fraud_signal)
+        self.router.get("/support", status_code=status.HTTP_200_OK)(self.list_support_tickets)
+        self.router.get("/support/assignees", status_code=status.HTTP_200_OK)(self.list_support_assignees)
+        self.router.get("/support/{ticket_id}", status_code=status.HTTP_200_OK)(self.get_support_ticket)
+        self.router.post("/support/{ticket_id}/reply", status_code=status.HTTP_200_OK)(self.reply_to_support_ticket)
+        self.router.patch("/support/{ticket_id}/status", status_code=status.HTTP_200_OK)(self.update_support_ticket)
         self.router.get(
             "/users",
             status_code=status.HTTP_200_OK,
@@ -304,11 +329,110 @@ class AdminController:
             success_message="Fraud signal reviewed successfully.",
         )
 
+    async def list_support_tickets(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._require_authenticated_admin_id(request)
+        return await self._execute(
+            action="list_support_tickets",
+            handler=self._resolve_handler("list_support_tickets"),
+            payload={
+                "admin_id": target_admin_id,
+                "page": page,
+                "page_size": page_size,
+                "search": search,
+                "status": status,
+                "priority": priority,
+            },
+            success_message="Support tickets retrieved successfully.",
+        )
+
+    async def list_support_assignees(self, *, request: Request) -> dict[str, Any]:
+        target_admin_id = self._require_authenticated_admin_id(request)
+        return await self._execute(
+            action="list_support_assignees",
+            handler=self._resolve_handler("list_support_assignees"),
+            payload={"admin_id": target_admin_id},
+            success_message="Support assignees retrieved successfully.",
+        )
+
+    async def get_support_ticket(
+        self,
+        ticket_id: str,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._require_authenticated_admin_id(request)
+        return await self._execute(
+            action="get_support_ticket",
+            handler=self._resolve_handler("get_support_ticket"),
+            payload={"admin_id": target_admin_id, "ticket_id": ticket_id},
+            success_message="Support ticket retrieved successfully.",
+        )
+
+    async def reply_to_support_ticket(
+        self,
+        ticket_id: str,
+        payload: SupportTicketReplyRequest,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._require_authenticated_admin_id(request)
+        return await self._execute(
+            action="reply_to_support_ticket",
+            handler=self._resolve_handler("reply_to_support_ticket"),
+            payload={
+                "admin_id": target_admin_id,
+                "ticket_id": ticket_id,
+                "content": payload.content,
+                "is_internal": payload.is_internal,
+            },
+            success_message="Support reply saved successfully.",
+        )
+
+    async def update_support_ticket(
+        self,
+        ticket_id: str,
+        payload: SupportTicketUpdateRequest,
+        admin_id: UUID | None = None,
+        *,
+        request: Request,
+    ) -> dict[str, Any]:
+        target_admin_id = self._require_authenticated_admin_id(request)
+        update_payload = payload.model_dump(exclude_unset=True)
+        service_payload: dict[str, Any] = {
+            "admin_id": target_admin_id,
+            "ticket_id": ticket_id,
+        }
+        for key, value in update_payload.items():
+            service_payload[key] = value
+        if "assignee_id" in update_payload:
+            service_payload["assignee_provided"] = True
+        return await self._execute(
+            action="update_support_ticket",
+            handler=self._resolve_handler("update_support_ticket"),
+            payload=service_payload,
+            success_message="Support ticket updated successfully.",
+        )
+
     @staticmethod
     def _require_authenticated_admin_id(request: Request) -> UUID:
-        auth_user = getattr(request.state, "auth_user", None)
+        auth_user = getattr(request.state, "auth_user", None) or getattr(request.state, "user", None)
         if auth_user is None or getattr(auth_user, "identity_type", None) != "admin":
             raise AuthorizationException(detail="An Admin identity is required.")
+        role = str(getattr(auth_user, "role", "") or "").strip().lower().replace(" ", "_")
+        if not role:
+            raise AuthorizationException(detail="Administrator role is invalid.")
         try:
             return UUID(str(getattr(auth_user, "user_id", "")))
         except (ValueError, TypeError) as exc:
@@ -1304,9 +1428,11 @@ class AdminController:
         )
 
     def _resolve_effective_admin_id(self, *, admin_id: UUID | None, request: Request | None) -> UUID:
-        authenticated_admin_id = self._resolve_authenticated_admin_id(request)
-        if authenticated_admin_id is not None:
-            return authenticated_admin_id
+        if request is not None:
+            authenticated_admin_id = self._resolve_authenticated_admin_id(request)
+            if authenticated_admin_id is not None:
+                return authenticated_admin_id
+            raise AuthorizationException(detail="An Admin identity is required.")
         if admin_id is not None:
             return admin_id
         return self._resolve_admin_id()
@@ -1314,8 +1440,10 @@ class AdminController:
     def _resolve_authenticated_admin_id(self, request: Request | None) -> UUID | None:
         if request is None:
             return None
-        auth_user = getattr(request.state, "auth_user", None)
-        raw_admin_id = getattr(auth_user, "user_id", None) if auth_user is not None else None
+        auth_user = getattr(request.state, "auth_user", None) or getattr(request.state, "user", None)
+        if auth_user is None or getattr(auth_user, "identity_type", None) != "admin":
+            return None
+        raw_admin_id = getattr(auth_user, "user_id", None)
         if raw_admin_id is None:
             auth_payload = getattr(request.state, "auth_payload", None)
             if isinstance(auth_payload, dict):
